@@ -1,6 +1,10 @@
 import puppeteer, { Browser, Page, HTTPRequest, HTTPResponse } from "puppeteer";
 import { type InterceptedRequest } from "../types";
-import { BROWSER_ARGS, NAVIGATION_TIMEOUT, RESPONSE_WAIT_TIME } from "../config";
+import {
+  BROWSER_ARGS,
+  NAVIGATION_TIMEOUT,
+  RESPONSE_WAIT_TIME,
+} from "../config";
 
 /**
  * Browser service for managing Puppeteer browser instances and request interception
@@ -15,6 +19,7 @@ export class BrowserService {
     console.log("\n[1/6] Launching browser...");
     this.browser = await puppeteer.launch({
       args: BROWSER_ARGS,
+      headless: false,
     });
     console.log("✅ Browser launched successfully");
     return this.browser;
@@ -151,4 +156,3 @@ export class BrowserService {
     return this.browser;
   }
 }
-

@@ -4,6 +4,8 @@ import express, {
   type NextFunction,
 } from "express";
 import { scrapeHandler } from "./routes/scrape.route";
+import { executeScrapeHandler } from "./routes/scrape-execute.route";
+import { scrapeInfoHandler } from "./routes/scrape-info.route";
 import { errorHandler } from "./middleware/error-handler";
 
 const app = express();
@@ -20,6 +22,8 @@ const asyncHandler = (fn: (req: Request, res: Response) => Promise<void>) => {
 
 // Routes
 app.get("/scrape", asyncHandler(scrapeHandler));
+app.get("/scrape/:id/info", asyncHandler(scrapeInfoHandler));
+app.get("/scrape/:id", asyncHandler(executeScrapeHandler));
 
 // Error handling middleware (must be last)
 app.use(errorHandler);

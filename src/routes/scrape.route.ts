@@ -5,6 +5,7 @@ import { BrowserService } from "../services/browser.service";
 import { generateScrapingInstructions } from "../services/openai.service";
 import { extractContextAroundSearchTerm } from "../utils/context-extractor";
 import { openai } from "../config";
+import { saveScrapingInstructions } from "../services/storage.service";
 
 /**
  * Scrape route handler
@@ -158,7 +159,14 @@ export async function scrapeHandler(
       return;
     }
 
-    res.json(scrapingInstructions);
+    // Save instructions to storage and return only the ID
+    const id = saveScrapingInstructions(
+      scrapingInstructions,
+      validUrl,
+      validSearch
+    );
+
+    res.json({ id });
   } catch (error) {
     // Error handling is done by the error handler middleware
     throw error;
