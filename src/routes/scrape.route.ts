@@ -145,7 +145,9 @@ export async function scrapeHandler(
         );
         const selectionResult = await selectBestRequest(
           matchingRequests,
-          validSearch
+          validSearch,
+          validExpectedOutputType,
+          validCustomPrompt
         );
         const candidate = matchingRequests[selectionResult.selectedIndex];
         if (!candidate) {
@@ -265,7 +267,9 @@ export async function scrapeHandler(
     id = await saveScrapingInstructions(
       scrapingInstructions,
       validUrl,
-      validSearch
+      validSearch,
+      validExpectedOutputType,
+      validCustomPrompt
     );
 
     res.json({ id });

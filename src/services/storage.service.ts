@@ -49,7 +49,7 @@ export async function saveScrapingInstructions(
     })
     .returning({ id: scrapingInstructions.id });
 
-  const id = result.id;
+  const id = result?.id as string;
 
   // Create initial snapshot (version 1)
   await db.insert(instructionSnapshots).values({
@@ -58,7 +58,9 @@ export async function saveScrapingInstructions(
     instructions,
   });
 
-  console.log(`✅ Saved scraping instructions with ID: ${id} (initial version 1)`);
+  console.log(
+    `✅ Saved scraping instructions with ID: ${id} (initial version 1)`
+  );
   return id;
 }
 
@@ -88,13 +90,19 @@ export async function updateScrapingInstructions(
   }
 
   // Check if instructions actually changed
-  const instructionsChanged = JSON.stringify(currentInstruction[0].instructions) !== JSON.stringify(instructions);
+  const currentInst = currentInstruction[0];
+  if (!currentInst) {
+    throw new Error(`Instructions not found for ID: ${id}`);
+  }
+  const instructionsChanged =
+    JSON.stringify(currentInst.instructions) !== JSON.stringify(instructions);
 
   // Only create a new snapshot if instructions actually changed
   if (instructionsChanged) {
-    const nextVersion = currentSnapshots.length > 0 
-      ? currentSnapshots[0].version + 1 
-      : 2; // If no snapshots exist, this is version 2 (version 1 was created on initial save)
+    const nextVersion =
+      currentSnapshots.length > 0 && currentSnapshots[0]
+        ? currentSnapshots[0].version + 1
+        : 2; // If no snapshots exist, this is version 2 (version 1 was created on initial save)
 
     // Update the main instructions table
     await db
@@ -112,7 +120,9 @@ export async function updateScrapingInstructions(
       instructions,
     });
 
-    console.log(`✅ Updated scraping instructions with ID: ${id} (version ${nextVersion})`);
+    console.log(
+      `✅ Updated scraping instructions with ID: ${id} (version ${nextVersion})`
+    );
   } else {
     // Instructions didn't change, just update timestamp
     await db
@@ -122,7 +132,9 @@ export async function updateScrapingInstructions(
       })
       .where(eq(scrapingInstructions.id, id));
 
-    console.log(`✅ Updated timestamp for instructions with ID: ${id} (no changes, no new snapshot)`);
+    console.log(
+      `✅ Updated timestamp for instructions with ID: ${id} (no changes, no new snapshot)`
+    );
   }
 }
 
@@ -143,6 +155,9 @@ export async function getScrapingInstructions(
   }
 
   const row = result[0];
+  if (!row) {
+    return null;
+  }
   return {
     id: row.id,
     instructions: row.instructions,
@@ -150,7 +165,11 @@ export async function getScrapingInstructions(
       createdAt: row.createdAt.toISOString(),
       originalUrl: row.originalUrl,
       originalSearch: row.originalSearch,
-      expectedOutputType: row.expectedOutputType || undefined,
+      expectedOutputType:
+        row.expectedOutputType === "array" ||
+        row.expectedOutputType === "object"
+          ? row.expectedOutputType
+          : undefined,
       customPrompt: row.customPrompt || undefined,
     },
   };
@@ -204,6 +223,9 @@ export async function saveScrapeResult(
     })
     .returning({ id: scrapeResults.id });
 
+  if (!result) {
+    throw new Error("Failed to save scrape result");
+  }
   const id = result.id;
   console.log(`✅ Saved scrape result with ID: ${id}`);
   return id;
@@ -227,6 +249,9 @@ export async function saveTestResult(
     })
     .returning({ id: testResults.id });
 
+  if (!result) {
+    throw new Error("Failed to save test result");
+  }
   const id = result.id;
   console.log(`✅ Saved test result with ID: ${id}`);
   return id;

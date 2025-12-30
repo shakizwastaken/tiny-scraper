@@ -144,7 +144,9 @@ CRITICAL REQUIREMENTS - Generate a complete JSON object with the following:
 
 1. RESPONSE TYPE & OUTPUT TYPE:
    - "responseType": "${responseType}" (json, html, or xml)
-   - "outputType": "array" or "object" (explicitly indicate if response is an array of items or a single object)${expectedOutputType ? ` (User expects: "${expectedOutputType}")` : ""}
+   - "outputType": "array" or "object" (explicitly indicate if response is an array of items or a single object)${
+     expectedOutputType ? ` (User expects: "${expectedOutputType}")` : ""
+   }
 
 2. DATA EXTRACTION - SELECTORS ONLY:
 

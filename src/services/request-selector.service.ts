@@ -10,7 +10,9 @@ import { openai, OPENAI_REFINEMENT_MODEL } from "../config";
  */
 export async function selectBestRequest(
   matches: InterceptedRequest[],
-  searchTerm: string
+  searchTerm: string,
+  expectedOutputType?: "array" | "object",
+  customPrompt?: string
 ): Promise<RequestSelectionResult> {
   if (!openai) {
     throw new Error("OpenAI client not initialized");
@@ -73,9 +75,27 @@ export async function selectBestRequest(
     };
   });
 
+  // Build output type hint section
+  const outputTypeHint = expectedOutputType
+    ? `\nIMPORTANT OUTPUT TYPE HINT:
+- The user expects the output to be: "${expectedOutputType}"
+- When evaluating requests, prioritize those that would produce "${expectedOutputType}" output (array vs single object)
+- If "${expectedOutputType}" is "array", prefer requests with array structures in their responses
+`
+    : "";
+
+  // Build custom prompt section
+  const customPromptSection = customPrompt
+    ? `\nCUSTOM USER INSTRUCTIONS:
+${customPrompt}
+
+Please consider these instructions when selecting the best request.
+`
+    : "";
+
   const prompt = `You are an expert at analyzing API requests and responses. I have ${
     matches.length
-  } HTTP requests that all contain the search term "${searchTerm}". I need you to select the BEST request for scraping data.
+  } HTTP requests that all contain the search term "${searchTerm}". I need you to select the BEST request for scraping data.${outputTypeHint}${customPromptSection}
 
 Here are the ${matches.length} requests:
 
