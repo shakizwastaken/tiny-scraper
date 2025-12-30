@@ -23,7 +23,9 @@ export async function generateScrapingInstructions(
   context: string,
   contentType: string | undefined,
   fullResponseBody: string,
-  useFullResponse: boolean = false
+  useFullResponse: boolean = false,
+  expectedOutputType?: "array" | "object",
+  customPrompt?: string
 ): Promise<ScrapingInstructions | null> {
   if (!openai) {
     console.log("   ⚠️  OpenAI client not initialized (missing API key)");
@@ -103,6 +105,23 @@ PAGINATION ANALYSIS:
 
   const responseContent = useFullResponse ? fullResponseBody : context;
 
+  // Build output type hint section
+  const outputTypeHint = expectedOutputType
+    ? `\nIMPORTANT OUTPUT TYPE HINT:
+   - The user expects the output to be: "${expectedOutputType}"
+   - You should set "outputType" to "${expectedOutputType}" unless the response structure clearly indicates otherwise.
+   - If "${expectedOutputType}" is "array", ensure you provide a containerSelector (for HTML) or rootPath pointing to an array (for JSON).
+`
+    : "";
+
+  // Build custom prompt section
+  const customPromptSection = customPrompt
+    ? `\nCUSTOM USER INSTRUCTIONS:
+${customPrompt}
+\nPlease incorporate these instructions into your analysis and generated scraping instructions.
+`
+    : "";
+
   const prompt = `You are an expert API analyst. Analyze this API response and generate comprehensive scraping instructions in JSON format.
 
 Request Details:
@@ -111,8 +130,7 @@ Request Details:
 - Headers: ${JSON.stringify(headers, null, 2)}
 ${postData ? `- Request Body: ${postData}` : ""}
 
-${paginationHintsSection}
-
+${paginationHintsSection}${outputTypeHint}${customPromptSection}
 Response Analysis:
 - Detected Type: ${responseType}
 ${
@@ -126,7 +144,7 @@ CRITICAL REQUIREMENTS - Generate a complete JSON object with the following:
 
 1. RESPONSE TYPE & OUTPUT TYPE:
    - "responseType": "${responseType}" (json, html, or xml)
-   - "outputType": "array" or "object" (explicitly indicate if response is an array of items or a single object)
+   - "outputType": "array" or "object" (explicitly indicate if response is an array of items or a single object)${expectedOutputType ? ` (User expects: "${expectedOutputType}")` : ""}
 
 2. DATA EXTRACTION - SELECTORS ONLY:
 

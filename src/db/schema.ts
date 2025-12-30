@@ -1,4 +1,12 @@
-import { pgTable, uuid, text, jsonb, timestamp, boolean, integer } from "drizzle-orm/pg-core";
+import {
+  pgTable,
+  uuid,
+  text,
+  jsonb,
+  timestamp,
+  boolean,
+  integer,
+} from "drizzle-orm/pg-core";
 import type { ScrapingInstructions, TestResults } from "../types/scraping";
 
 /**
@@ -9,6 +17,8 @@ export const scrapingInstructions = pgTable("scraping_instructions", {
   instructions: jsonb("instructions").$type<ScrapingInstructions>().notNull(),
   originalUrl: text("original_url").notNull(),
   originalSearch: text("original_search").notNull(),
+  expectedOutputType: text("expected_output_type"), // Optional hint: "array" or "object"
+  customPrompt: text("custom_prompt"), // Optional custom prompt text
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
@@ -67,4 +77,3 @@ export type TestResult = typeof testResults.$inferSelect;
 export type NewTestResult = typeof testResults.$inferInsert;
 export type InstructionSnapshot = typeof instructionSnapshots.$inferSelect;
 export type NewInstructionSnapshot = typeof instructionSnapshots.$inferInsert;
-

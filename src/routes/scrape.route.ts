@@ -32,17 +32,32 @@ export async function scrapeHandler(
   req: Request,
   res: Response
 ): Promise<void> {
-  const { url, search } = req.query;
+  const { url, search, expectedOutputType, customPrompt } = req.query;
 
   console.log("\n=== SCRAPING REQUEST STARTED ===");
   console.log("URL:", url);
   console.log("Search term:", search);
+  console.log("Expected output type:", expectedOutputType || "(not specified)");
+  console.log(
+    "Custom prompt:",
+    customPrompt ? `${customPrompt.length} chars` : "(not provided)"
+  );
   console.log("Timestamp:", new Date().toISOString());
 
   // Validate query parameters
-  let validatedParams: { url: string; search: string };
+  let validatedParams: {
+    url: string;
+    search: string;
+    expectedOutputType?: "array" | "object";
+    customPrompt?: string;
+  };
   try {
-    validatedParams = validateScrapeRequest(url, search);
+    validatedParams = validateScrapeRequest(
+      url,
+      search,
+      expectedOutputType,
+      customPrompt
+    );
   } catch (error) {
     const errorMessage =
       error instanceof Error ? error.message : "Validation failed";
@@ -51,7 +66,12 @@ export async function scrapeHandler(
     return;
   }
 
-  const { url: validUrl, search: validSearch } = validatedParams;
+  const {
+    url: validUrl,
+    search: validSearch,
+    expectedOutputType: validExpectedOutputType,
+    customPrompt: validCustomPrompt,
+  } = validatedParams;
   console.log("✅ Parameters validated");
 
   const browserService = new BrowserService();
@@ -205,7 +225,9 @@ export async function scrapeHandler(
           context,
           contentType,
           responseBody!,
-          useFullResponse
+          useFullResponse,
+          validExpectedOutputType,
+          validCustomPrompt
         );
 
         if (instructions) {

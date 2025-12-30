@@ -234,17 +234,6 @@ function extractFromJSON(
     }
   }
 
-  // Extract fields
-  const result: Record<string, any> = {};
-  Object.entries(jsonPath.fieldPaths).forEach(([fieldName, path]) => {
-    const results = JSONPath({ path, json: rootData });
-    if (results.length > 0) {
-      result[fieldName] = results[0];
-    } else {
-      result[fieldName] = null;
-    }
-  });
-
   if (instructions.outputType === "array") {
     // If rootData is an array, extract from each item
     if (Array.isArray(rootData)) {
@@ -289,25 +278,92 @@ function extractFromJSON(
 
       return results;
     }
-    // If rootData is an object, try to find array in it
-    const arrayPath = jsonPath.rootPath || "$";
-    const arrayResults = JSONPath({ path: arrayPath, json });
-    if (Array.isArray(arrayResults[0])) {
-      return arrayResults[0].map((item: any) => {
-        const itemResult: Record<string, any> = {};
-        Object.entries(jsonPath.fieldPaths).forEach(([fieldName, path]) => {
-          const results = JSONPath({ path, json: item });
-          if (results.length > 0) {
-            itemResult[fieldName] = results[0];
-          } else {
-            itemResult[fieldName] = null;
-          }
-        });
-        return itemResult;
-      });
+    
+    // If rootData is not an array, log error and try to find array elsewhere
+    console.error(
+      `❌ ERROR: outputType is "array" but rootData at path "${jsonPath.rootPath || "$"}" is not an array. Got: ${typeof rootData}`
+    );
+    
+    // Try to find array in the JSON structure - search common patterns
+    const searchPaths = [
+      "$.data[*]",
+      "$.items[*]",
+      "$.results[*]",
+      "$.list[*]",
+      "$[*]",
+      "$.data.items[*]",
+      "$.data.results[*]",
+    ];
+    
+    for (const searchPath of searchPaths) {
+      try {
+        const arrayResults = JSONPath({ path: searchPath, json });
+        if (Array.isArray(arrayResults) && arrayResults.length > 0 && Array.isArray(arrayResults[0])) {
+          console.log(`   ℹ️  Found array at path: ${searchPath}`);
+          const arrayData = arrayResults[0];
+          
+          const debugInfo: ExtractionDebugInfo = {
+            containerCount: arrayData.length,
+            selectorMatches: {},
+            fieldExtractionStats: {},
+          };
+
+          Object.keys(jsonPath.fieldPaths).forEach((fieldName) => {
+            debugInfo.fieldExtractionStats![fieldName] = {
+              success: 0,
+              failed: 0,
+              nullCount: 0,
+            };
+          });
+
+          const results = arrayData.map((item: any) => {
+            const itemResult: Record<string, any> = {};
+            Object.entries(jsonPath.fieldPaths).forEach(([fieldName, path]) => {
+              const pathResults = JSONPath({ path, json: item });
+              const stats = debugInfo.fieldExtractionStats![fieldName];
+              if (pathResults.length > 0) {
+                itemResult[fieldName] = pathResults[0];
+                if (stats) {
+                  stats.success++;
+                }
+              } else {
+                itemResult[fieldName] = null;
+                if (stats) {
+                  stats.failed++;
+                  stats.nullCount++;
+                }
+              }
+            });
+            return itemResult;
+          });
+
+          debugInfo.itemsExtracted = results.length;
+          logExtractionDebugInfo(debugInfo);
+
+          return results;
+        }
+      } catch (e) {
+        // Continue searching
+      }
     }
-    return [result];
+    
+    // Last resort: if we can't find an array, throw an error
+    throw new Error(
+      `Cannot extract array: rootPath "${jsonPath.rootPath || "$"}" points to a ${typeof rootData}, not an array. ` +
+      `Please check that the rootPath in jsonPath points to an array.`
+    );
   }
+
+  // Single object extraction
+  const result: Record<string, any> = {};
+  Object.entries(jsonPath.fieldPaths).forEach(([fieldName, path]) => {
+    const results = JSONPath({ path, json: rootData });
+    if (results.length > 0) {
+      result[fieldName] = results[0];
+    } else {
+      result[fieldName] = null;
+    }
+  });
 
   return result;
 }

@@ -16,6 +16,8 @@ export interface ScrapingInstructionMetadata {
     createdAt: string;
     originalUrl: string;
     originalSearch: string;
+    expectedOutputType?: "array" | "object";
+    customPrompt?: string;
   };
 }
 
@@ -32,7 +34,9 @@ export function generateId(): string {
 export async function saveScrapingInstructions(
   instructions: ScrapingInstructions,
   originalUrl: string,
-  originalSearch: string
+  originalSearch: string,
+  expectedOutputType?: "array" | "object",
+  customPrompt?: string
 ): Promise<string> {
   const [result] = await db
     .insert(scrapingInstructions)
@@ -40,6 +44,8 @@ export async function saveScrapingInstructions(
       instructions,
       originalUrl,
       originalSearch,
+      expectedOutputType: expectedOutputType || null,
+      customPrompt: customPrompt || null,
     })
     .returning({ id: scrapingInstructions.id });
 
@@ -144,6 +150,8 @@ export async function getScrapingInstructions(
       createdAt: row.createdAt.toISOString(),
       originalUrl: row.originalUrl,
       originalSearch: row.originalSearch,
+      expectedOutputType: row.expectedOutputType || undefined,
+      customPrompt: row.customPrompt || undefined,
     },
   };
 }
