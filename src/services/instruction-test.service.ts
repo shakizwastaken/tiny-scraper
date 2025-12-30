@@ -1,6 +1,6 @@
 import { type ScrapingInstructions, type TestResults } from "../types";
 import { scrapeWithInstructions } from "./scraper.service";
-import { getScrapingInstructions } from "./storage.service";
+import { getScrapingInstructions, saveTestResult } from "./storage.service";
 
 /**
  * Validate extracted data against JSON schema
@@ -111,7 +111,7 @@ export async function testInstructions(
   console.log(`ID: ${id}`);
 
   try {
-    const metadata = getScrapingInstructions(id);
+    const metadata = await getScrapingInstructions(id);
     if (!metadata) {
       return {
         success: false,
@@ -241,6 +241,14 @@ export async function testInstructions(
           `   Missing fields: ${testResults.requiredFieldsMissing.join(", ")}`
         );
       }
+    }
+
+    // Save test result to database
+    try {
+      await saveTestResult(id, testResults);
+    } catch (error) {
+      console.error("⚠️  Failed to save test result to database:", error);
+      // Don't throw - we still want to return the result even if saving fails
     }
 
     return testResults;

@@ -172,7 +172,7 @@ export async function scrapeHandler(
     }
 
     // Save initial instructions to storage (will be updated during refinement)
-    id = saveScrapingInstructions(scrapingInstructions, validUrl, validSearch);
+    id = await saveScrapingInstructions(scrapingInstructions, validUrl, validSearch);
 
     res.json({ id });
 
@@ -239,7 +239,7 @@ async function runTestingAndRefinementLoop(
       console.log(`\n--- Iteration ${iteration}/${maxIterations} ---`);
 
       // Update instructions in storage before testing
-      updateScrapingInstructions(id, currentInstructions);
+      await updateScrapingInstructions(id, currentInstructions);
 
       // Test the current instructions
       const testResults = await testInstructions(id);
@@ -273,7 +273,7 @@ async function runTestingAndRefinementLoop(
             `\n✅ Instructions approved by agent after ${iteration} iteration(s)`
           );
           // Final update with approved instructions
-          updateScrapingInstructions(id, currentInstructions);
+          await updateScrapingInstructions(id, currentInstructions);
           return;
         }
 
@@ -309,7 +309,7 @@ async function runTestingAndRefinementLoop(
     console.log(
       `\n⚠️  Maximum iterations (${maxIterations}) reached. Using last tested instructions.`
     );
-    updateScrapingInstructions(id, currentInstructions);
+    await updateScrapingInstructions(id, currentInstructions);
     throw new Error(
       `Testing and refinement did not complete successfully after ${maxIterations} iterations`
     );

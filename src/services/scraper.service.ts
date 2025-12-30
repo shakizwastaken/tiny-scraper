@@ -3,6 +3,7 @@ import * as cheerio from "cheerio";
 import { type ScrapingInstructions } from "../types";
 import {
   getScrapingInstructions,
+  saveScrapeResult,
   type ScrapingInstructionMetadata,
 } from "./storage.service";
 
@@ -525,7 +526,7 @@ export async function scrapeWithInstructions(
   id: string,
   paginationOptions: PaginationOptions = {}
 ): Promise<ScrapeResult> {
-  const metadata = getScrapingInstructions(id);
+  const metadata = await getScrapingInstructions(id);
   if (!metadata) {
     throw new Error(`Scraping instructions not found for ID: ${id}`);
   }
@@ -557,6 +558,14 @@ export async function scrapeWithInstructions(
         offset: paginationOptions.offset,
       },
     };
+
+    // Save scrape result to database
+    try {
+      await saveScrapeResult(id, data, result.pagination);
+    } catch (error) {
+      console.error("⚠️  Failed to save scrape result to database:", error);
+      // Don't throw - we still want to return the result even if saving fails
+    }
 
     console.log(
       `✅ Scraping completed. Extracted ${

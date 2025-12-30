@@ -19,7 +19,7 @@ export async function scrapeInfoHandler(
   }
 
   try {
-    const metadata = getScrapingMetadata(id);
+    const metadata = await getScrapingMetadata(id);
 
     if (!metadata) {
       res.status(404).json({ error: `Scraping instructions not found for ID: ${id}` });
