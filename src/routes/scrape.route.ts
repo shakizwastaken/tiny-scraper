@@ -3,8 +3,14 @@ import { type ScrapingInstructions } from "../types";
 import { validateScrapeRequest } from "../validators/request.validator";
 import { BrowserService } from "../services/browser.service";
 import { generateScrapingInstructions } from "../services/openai.service";
-import { extractContextAroundSearchTerm } from "../utils/context-extractor";
+import {
+  extractContextAroundSearchTerm,
+  shouldUseFullPassthrough,
+} from "../utils/context-extractor";
 import { openai } from "../config";
+import { FULL_RESPONSE_THRESHOLD } from "../config";
+import { selectBestRequest } from "../services/request-selector.service";
+import type { InterceptedRequest } from "../types/scraping";
 import {
   saveScrapingInstructions,
   updateScrapingInstructions,
@@ -69,10 +75,12 @@ export async function scrapeHandler(
       `Total intercepted requests stored: ${interceptedRequests.length}`
     );
 
-    // Find first request where response body contains the search term (case-insensitive)
+    // Find all requests where response body contains the search term (case-insensitive)
     console.log("\n[6/6] Filtering requests by search term...");
     const searchLower = validSearch.toLowerCase();
     console.log(`   Search term (lowercase): "${searchLower}"`);
+
+    const matchingRequests: InterceptedRequest[] = [];
 
     for (let i = 0; i < interceptedRequests.length; i++) {
       const intercepted = interceptedRequests[i];
@@ -99,57 +107,117 @@ export async function scrapeHandler(
       );
 
       if (containsSearch) {
-        console.log(`   ✅ MATCH FOUND! Processing with GPT...`);
+        matchingRequests.push(intercepted);
+        console.log(
+          `   ✅ MATCH FOUND! (Total matches: ${matchingRequests.length})`
+        );
+      }
+    }
 
-        const requestHeaders: Record<string, string> = {};
-        const reqHeaders = request.headers();
-        Object.entries(reqHeaders).forEach(([key, value]) => {
-          requestHeaders[key] = value;
-        });
-
-        const method = request.method();
-        const postData = request.postData() || undefined;
-
-        // Generate scraping instructions with GPT
-        try {
-          // Extract context around search term
-          const context = extractContextAroundSearchTerm(
-            responseBody,
-            validSearch,
-            1000000 // Max tokens available
-          );
-
-          // Get content type from response headers
-          const contentType = response
-            ? response.headers()["content-type"] || undefined
-            : undefined;
-
-          // Generate scraping instructions
-          const instructions = await generateScrapingInstructions(
-            openai,
-            requestUrl,
-            method,
-            requestHeaders,
-            postData,
-            context,
-            contentType,
-            responseBody
-          );
-
-          if (instructions) {
-            scrapingInstructions = instructions;
-            console.log(`   ✅ Scraping instructions generated successfully`);
-          }
-        } catch (error) {
-          gptError = error instanceof Error ? error.message : String(error);
-          console.error(
-            `   ❌ Failed to generate scraping instructions:`,
-            gptError
-          );
+    if (matchingRequests.length === 0) {
+      console.log("   ❌ No matching requests found");
+    } else {
+      // Select best request if multiple matches
+      let selectedRequest: InterceptedRequest;
+      if (matchingRequests.length > 1) {
+        console.log(
+          `\n=== SELECTING BEST REQUEST FROM ${matchingRequests.length} MATCHES ===`
+        );
+        const selectionResult = await selectBestRequest(
+          matchingRequests,
+          validSearch
+        );
+        const candidate = matchingRequests[selectionResult.selectedIndex];
+        if (!candidate) {
+          throw new Error("Selected request index is invalid");
         }
+        selectedRequest = candidate;
+        console.log(
+          `✅ Selected request #${selectionResult.selectedIndex + 1}: ${
+            selectionResult.reasoning
+          }`
+        );
+      } else {
+        const candidate = matchingRequests[0];
+        if (!candidate) {
+          throw new Error("No matching request available");
+        }
+        selectedRequest = candidate;
+        console.log(`✅ Using single match`);
+      }
 
-        // Break after processing first match
-        break;
+      const { request, response, responseBody } = selectedRequest;
+      const requestUrl = request.url();
+
+      console.log(
+        `\n   Processing selected request: ${request.method()} ${requestUrl}`
+      );
+
+      const requestHeaders: Record<string, string> = {};
+      const reqHeaders = request.headers();
+      Object.entries(reqHeaders).forEach(([key, value]) => {
+        requestHeaders[key] = value;
+      });
+
+      const method = request.method();
+      const postData = request.postData() || undefined;
+
+      // Get content type from response headers
+      const contentType = response
+        ? response.headers()["content-type"] || undefined
+        : undefined;
+
+      // Check if we should use full response passthrough
+      const useFullResponse = shouldUseFullPassthrough(
+        responseBody!,
+        FULL_RESPONSE_THRESHOLD
+      );
+
+      let context: string;
+      if (useFullResponse) {
+        console.log(
+          `   📄 Using full response passthrough (${
+            responseBody!.length
+          } chars < ${FULL_RESPONSE_THRESHOLD})`
+        );
+        context = responseBody!;
+      } else {
+        console.log(
+          `   ✂️  Extracting context (${
+            responseBody!.length
+          } chars >= ${FULL_RESPONSE_THRESHOLD})`
+        );
+        context = extractContextAroundSearchTerm(
+          responseBody!,
+          validSearch,
+          1000000 // Max tokens available
+        );
+      }
+
+      // Generate scraping instructions with GPT
+      try {
+        const instructions = await generateScrapingInstructions(
+          openai,
+          requestUrl,
+          method,
+          requestHeaders,
+          postData,
+          context,
+          contentType,
+          responseBody!,
+          useFullResponse
+        );
+
+        if (instructions) {
+          scrapingInstructions = instructions;
+          console.log(`   ✅ Scraping instructions generated successfully`);
+        }
+      } catch (error) {
+        gptError = error instanceof Error ? error.message : String(error);
+        console.error(
+          `   ❌ Failed to generate scraping instructions:`,
+          gptError
+        );
       }
     }
 
@@ -172,7 +240,11 @@ export async function scrapeHandler(
     }
 
     // Save initial instructions to storage (will be updated during refinement)
-    id = await saveScrapingInstructions(scrapingInstructions, validUrl, validSearch);
+    id = await saveScrapingInstructions(
+      scrapingInstructions,
+      validUrl,
+      validSearch
+    );
 
     res.json({ id });
 

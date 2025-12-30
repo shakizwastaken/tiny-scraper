@@ -1,6 +1,10 @@
 import { type ScrapingInstructions, type TestResults } from "../types";
-import { scrapeWithInstructions } from "./scraper.service";
+import {
+  scrapeWithInstructions,
+  type PaginationOptions,
+} from "./scraper.service";
 import { getScrapingInstructions, saveTestResult } from "./storage.service";
+import { logPaginationDebugInfo } from "./debug.service";
 
 /**
  * Validate extracted data against JSON schema
@@ -33,17 +37,16 @@ function validateAgainstSchema(
       const actualType = Array.isArray(value)
         ? "array"
         : typeof value === "object" && value !== null
-          ? "object"
-          : typeof value;
+        ? "object"
+        : typeof value;
 
       if (expectedType === "array" && !Array.isArray(value)) {
-        errors.push(
-          `Field "${fieldName}": expected array, got ${actualType}`
-        );
-      } else if (expectedType === "object" && (actualType !== "object" || Array.isArray(value))) {
-        errors.push(
-          `Field "${fieldName}": expected object, got ${actualType}`
-        );
+        errors.push(`Field "${fieldName}": expected array, got ${actualType}`);
+      } else if (
+        expectedType === "object" &&
+        (actualType !== "object" || Array.isArray(value))
+      ) {
+        errors.push(`Field "${fieldName}": expected object, got ${actualType}`);
       } else if (
         !["array", "object"].includes(expectedType) &&
         actualType !== expectedType
@@ -77,9 +80,11 @@ function validateAgainstSchema(
     // Validate first item (sample)
     if (schema.items && schema.items.properties) {
       const firstItem = data[0];
-      Object.entries(schema.items.properties).forEach(([fieldName, propSchema]) => {
-        validateProperty(firstItem[fieldName], propSchema, fieldName);
-      });
+      Object.entries(schema.items.properties).forEach(
+        ([fieldName, propSchema]) => {
+          validateProperty(firstItem[fieldName], propSchema, fieldName);
+        }
+      );
     }
   } else if (schema.type === "object") {
     if (Array.isArray(data) || typeof data !== "object" || data === null) {
@@ -104,9 +109,7 @@ function validateAgainstSchema(
 /**
  * Test scraping instructions by executing them
  */
-export async function testInstructions(
-  id: string
-): Promise<TestResults> {
+export async function testInstructions(id: string): Promise<TestResults> {
   console.log(`\n=== TESTING INSTRUCTIONS ===`);
   console.log(`ID: ${id}`);
 
@@ -123,7 +126,10 @@ export async function testInstructions(
 
     // Capture actual HTML response for debugging (if HTML/XML)
     let actualHtmlResponse: string | undefined;
-    if (instructions.responseType === "html" || instructions.responseType === "xml") {
+    if (
+      instructions.responseType === "html" ||
+      instructions.responseType === "xml"
+    ) {
       try {
         // Build the request URL and headers
         const { url, body, headers, queryParams } = buildRequestParams(
@@ -206,7 +212,10 @@ export async function testInstructions(
     }
 
     const testResults: TestResults = {
-      success: validation.valid && extractedData !== null && extractedData !== undefined,
+      success:
+        validation.valid &&
+        extractedData !== null &&
+        extractedData !== undefined,
       extractedData: dataSample,
       errors: validation.errors.length > 0 ? validation.errors : undefined,
       schemaValidationErrors:
@@ -216,9 +225,7 @@ export async function testInstructions(
           ? validation.missingFields
           : undefined,
       debugInfo: {
-        totalItems: Array.isArray(extractedData)
-          ? extractedData.length
-          : 1,
+        totalItems: Array.isArray(extractedData) ? extractedData.length : 1,
         outputType: instructions.outputType,
         responseType: instructions.responseType,
         hasPagination: !!instructions.pagination,
@@ -236,7 +243,10 @@ export async function testInstructions(
       if (testResults.errors && testResults.errors.length > 0) {
         console.log(`   Errors: ${testResults.errors.join(", ")}`);
       }
-      if (testResults.requiredFieldsMissing && testResults.requiredFieldsMissing.length > 0) {
+      if (
+        testResults.requiredFieldsMissing &&
+        testResults.requiredFieldsMissing.length > 0
+      ) {
         console.log(
           `   Missing fields: ${testResults.requiredFieldsMissing.join(", ")}`
         );
@@ -253,8 +263,7 @@ export async function testInstructions(
 
     return testResults;
   } catch (error) {
-    const errorMessage =
-      error instanceof Error ? error.message : String(error);
+    const errorMessage = error instanceof Error ? error.message : String(error);
     console.error(`❌ Test failed with error: ${errorMessage}`);
     return {
       success: false,
@@ -375,4 +384,3 @@ function buildRequestParams(
 
   return { url, body, headers, queryParams };
 }
-

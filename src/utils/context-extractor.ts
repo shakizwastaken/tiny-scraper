@@ -1,3 +1,5 @@
+import { extractPaginationContext } from "./pagination-detector";
+
 /**
  * Extract context around the search term, centering it in the available context window
  */
@@ -40,3 +42,43 @@ export function extractContextAroundSearchTerm(
   return context;
 }
 
+/**
+ * Extract context including pagination information
+ */
+export function extractContextWithPagination(
+  responseBody: string,
+  searchTerm: string,
+  maxTokens: number = 1000000
+): { dataContext: string; paginationContext: string } {
+  // Extract data context (around search term) - use 70% of tokens
+  const dataContext = extractContextAroundSearchTerm(
+    responseBody,
+    searchTerm,
+    maxTokens * 0.7
+  );
+
+  // Extract pagination context - use remaining 30% of tokens
+  const paginationContext = extractPaginationContext(responseBody);
+
+  // Limit pagination context to available tokens
+  const maxPaginationChars = maxTokens * 0.3 * 4;
+  const limitedPaginationContext =
+    paginationContext.length > maxPaginationChars
+      ? paginationContext.substring(0, maxPaginationChars)
+      : paginationContext;
+
+  return {
+    dataContext,
+    paginationContext: limitedPaginationContext,
+  };
+}
+
+/**
+ * Determine if response should use full passthrough (small enough to send entirely)
+ */
+export function shouldUseFullPassthrough(
+  responseBody: string,
+  threshold: number = 500000
+): boolean {
+  return responseBody.length < threshold;
+}

@@ -2,11 +2,14 @@ import OpenAI from "openai";
 import { type ScrapingInstructions } from "../types";
 import { detectResponseType } from "../utils/response-detector";
 import { validateScrapingInstructions } from "../validators/scraping.validator";
+import { OPENAI_MODEL, OPENAI_MAX_TOKENS, OPENAI_TEMPERATURE } from "../config";
 import {
-  OPENAI_MODEL,
-  OPENAI_MAX_TOKENS,
-  OPENAI_TEMPERATURE,
-} from "../config";
+  detectPaginationFromUrl,
+  detectPaginationFromHTML,
+  detectPaginationFromJSON,
+  extractPaginationContext,
+  type PaginationHints,
+} from "../utils/pagination-detector";
 
 /**
  * Generate scraping instructions using GPT
@@ -19,7 +22,8 @@ export async function generateScrapingInstructions(
   postData: string | undefined,
   context: string,
   contentType: string | undefined,
-  fullResponseBody: string
+  fullResponseBody: string,
+  useFullResponse: boolean = false
 ): Promise<ScrapingInstructions | null> {
   if (!openai) {
     console.log("   ⚠️  OpenAI client not initialized (missing API key)");
@@ -35,6 +39,70 @@ export async function generateScrapingInstructions(
 
   const baseUrl = requestUrl.split("?")[0];
 
+  // Detect pagination hints
+  const urlHints = detectPaginationFromUrl(requestUrl);
+  let responseHints: PaginationHints = {};
+
+  try {
+    if (responseType === "json") {
+      const json = JSON.parse(fullResponseBody);
+      responseHints = detectPaginationFromJSON(json);
+    } else {
+      responseHints = detectPaginationFromHTML(fullResponseBody);
+    }
+  } catch (e) {
+    // Ignore errors in pagination detection
+    console.log("   ⚠️  Pagination detection error, continuing without hints");
+  }
+
+  // Extract pagination context
+  const paginationContext = extractPaginationContext(fullResponseBody);
+
+  // Build pagination hints section
+  const paginationHintsSection =
+    urlHints.detectedPattern || responseHints.detectedPattern
+      ? `
+PAGINATION DETECTION HINTS:
+${
+  urlHints.detectedPattern
+    ? `- URL Pattern Detected: ${urlHints.detectedPattern}`
+    : ""
+}
+${
+  urlHints.queryParams && Object.keys(urlHints.queryParams).length > 0
+    ? `- URL Query Params: ${JSON.stringify(urlHints.queryParams)}`
+    : ""
+}
+${
+  responseHints.bodyParams && Object.keys(responseHints.bodyParams).length > 0
+    ? `- Response Pagination Fields: ${JSON.stringify(
+        responseHints.bodyParams
+      )}`
+    : ""
+}
+${
+  responseHints.hasPaginationControls
+    ? `- HTML contains pagination controls (links, buttons, etc.)`
+    : ""
+}
+${
+  urlHints.examples && urlHints.examples.length > 0
+    ? `- Example patterns found: ${urlHints.examples.join(", ")}`
+    : ""
+}
+
+PAGINATION CONTEXT FROM RESPONSE:
+${paginationContext || "(No pagination context found)"}
+`
+      : `
+PAGINATION ANALYSIS:
+- No clear pagination patterns detected in URL or response
+- If pagination exists, it may use non-standard parameter names
+- Analyze the request/response carefully for any pagination indicators
+`;
+
+  const responseContent = useFullResponse ? fullResponseBody : context;
+
   const prompt = `You are an expert API analyst. Analyze this API response and generate comprehensive scraping instructions in JSON format.
 
 Request Details:
@@ -43,10 +111,16 @@ Request Details:
 - Headers: ${JSON.stringify(headers, null, 2)}
 ${postData ? `- Request Body: ${postData}` : ""}
 
+${paginationHintsSection}
+
 Response Analysis:
 - Detected Type: ${responseType}
-- Response Context (search term is centered in the middle):
-${context}
+${
+  useFullResponse
+    ? `- Full Response Body (${fullResponseBody.length} characters):`
+    : `- Response Context (search term is centered in the middle):`
+}
+${responseContent}
 
 CRITICAL REQUIREMENTS - Generate a complete JSON object with ALL of the following:
 
@@ -99,12 +173,32 @@ CRITICAL REQUIREMENTS - Generate a complete JSON object with ALL of the followin
      }
    }
 
-4. PAGINATION (if applicable):
+4. PAGINATION (REQUIRED if pagination exists, otherwise omit entirely):
+   CRITICAL: Only include pagination if you can clearly identify pagination patterns. If uncertain, omit it.
+   
+   If pagination is detected:
    - "pagination" object with:
      - "type": "query" | "body" | "header" | "response"
-     - "location": exact path (e.g., "query.page", "body.offset", "response.nextPage")
-     - "placeholder": "{{page}}" or "{{offset}}" etc.
-     - "initialValue": starting value
+       * Use "query" if pagination is in URL query parameters (e.g., ?page=1)
+       * Use "body" if pagination is in request body (e.g., POST/PUT with {"page": 1})
+       * Use "header" if pagination is in headers (rare)
+       * Use "response" if pagination info comes from response (e.g., {"nextPage": "url"})
+     - "location": exact path (e.g., "query.page", "body.pagination.page", "body.page")
+       * For query: "query.{paramName}" where paramName is the actual query param
+       * For body: "body.{path.to.field}" using dot notation
+       * For response: "response.{path.to.nextPageUrl}"
+     - "placeholder": "{{page}}" or "{{offset}}" or "{{cursor}}" etc.
+       * Use "{{page}}" for page-based pagination (1, 2, 3...)
+       * Use "{{offset}}" for offset-based (0, 20, 40...)
+       * Use "{{cursor}}" for cursor-based (tokens, IDs)
+     - "initialValue": starting value (usually 1 for pages, 0 for offsets)
+   
+   Common patterns:
+   - Page-based: type="query", location="query.page", placeholder="{{page}}", initialValue=1
+   - Offset-based: type="query", location="query.offset", placeholder="{{offset}}", initialValue=0
+   - Body pagination: type="body", location="body.page", placeholder="{{page}}", initialValue=1
+   
+   If NO pagination exists, do NOT include the "pagination" field at all.
 
 5. REQUEST STRUCTURE:
    - "body": structure with placeholders (if POST/PUT/PATCH)
@@ -193,4 +287,3 @@ Expected JSON structure:
     throw error;
   }
 }
-

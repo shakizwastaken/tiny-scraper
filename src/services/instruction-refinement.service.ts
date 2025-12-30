@@ -36,6 +36,7 @@ export async function refineInstructions(
     requiredFieldsMissing: testResults.requiredFieldsMissing || [],
     extractedDataSample: testResults.extractedData,
     debugInfo: testResults.debugInfo,
+    paginationTestResult: testResults.paginationTestResult,
   };
 
   // Include HTML response if available (for debugging selector issues)
@@ -60,6 +61,19 @@ ${JSON.stringify(testResultsSummary, null, 2)}${htmlContext}
 
 CURRENT INSTRUCTIONS:
 ${JSON.stringify(instructions, null, 2)}
+
+${
+  instructions.pagination
+    ? `NOTE: Pagination is currently configured. Verify it's working correctly.
+     If test results show pagination issues (paginationTestResult), you may need to:
+     - Fix the pagination type (query vs body vs header)
+     - Correct the location path
+     - Adjust the placeholder format
+     - Set the correct initialValue`
+    : `NOTE: No pagination is currently configured. If the response appears to have pagination
+     (e.g., shows partial results, has "next" buttons, pagination controls in HTML),
+     you should add a pagination object.`
+}
 
 Please analyze the test results and the current instructions. 
 
@@ -179,8 +193,14 @@ export function initializeConversationHistory(): ConversationMessage[] {
       content: `You are an expert at analyzing and refining web scraping instructions. Your task is to review test results from executing scraping instructions and determine if they need to be modified.
 
 When test results show:
-- Success: All data extracted correctly, schema validation passes, all required fields present → Respond with {"ok": true}
-- Failures: Errors in extraction, schema validation failures, missing required fields → Respond with {"modification": {<updated instructions>}, "reason": "<explanation>"}
+- Success: All data extracted correctly, schema validation passes, all required fields present, pagination works (if configured) → Respond with {"ok": true}
+- Failures: Errors in extraction, schema validation failures, missing required fields, pagination not working → Respond with {"modification": {<updated instructions>}, "reason": "<explanation>"}
+
+Pay special attention to:
+- Field extraction statistics in debugInfo (selector matches, success rates)
+- Pagination test results (if paginationTestResult shows failures, fix pagination configuration)
+- Required fields that are missing (ensure selectors are correct)
+- Schema validation errors (fix field types or selectors)
 
 Always return valid JSON only. The modification must be a complete, valid ScrapingInstructions object that fixes the issues found in the test results.`,
     },

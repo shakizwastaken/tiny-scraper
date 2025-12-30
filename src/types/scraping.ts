@@ -85,10 +85,49 @@ export interface TestResults {
   schemaValidationErrors?: string[];
   requiredFieldsMissing?: string[];
   debugInfo?: Record<string, any>;
+  paginationTestResult?: {
+    tested: boolean;
+    passed?: boolean;
+    error?: string;
+  };
 }
 
 export interface RefinementResponse {
   ok: boolean;
   modification?: ScrapingInstructions;
   reason?: string; // Optional explanation
+}
+
+export interface PaginationHints {
+  queryParams?: Record<string, string>;
+  bodyParams?: Record<string, any>;
+  urlPattern?: string;
+  hasPaginationControls?: boolean;
+  detectedPattern?: "page" | "offset" | "cursor" | "none";
+  examples?: string[];
+}
+
+export interface ExtractionDebugInfo {
+  selectorMatches?: Record<string, number>;
+  fieldExtractionStats?: Record<
+    string,
+    { success: number; failed: number; nullCount: number }
+  >;
+  containerCount?: number;
+  itemsExtracted?: number;
+}
+
+export interface RequestSelectionResult {
+  selectedIndex: number;
+  reasoning: string;
+  scores?: Record<
+    number,
+    {
+      dataQuality: number;
+      completeness: number;
+      relevance: number;
+      contentType: number;
+      total: number;
+    }
+  >;
 }

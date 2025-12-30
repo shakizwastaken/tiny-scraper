@@ -6,6 +6,8 @@ import {
   saveScrapeResult,
   type ScrapingInstructionMetadata,
 } from "./storage.service";
+import { logExtractionDebugInfo } from "./debug.service";
+import type { ExtractionDebugInfo } from "../types/scraping";
 
 export interface PaginationOptions {
   page?: number;
@@ -246,18 +248,46 @@ function extractFromJSON(
   if (instructions.outputType === "array") {
     // If rootData is an array, extract from each item
     if (Array.isArray(rootData)) {
-      return rootData.map((item) => {
+      const debugInfo: ExtractionDebugInfo = {
+        containerCount: rootData.length,
+        selectorMatches: {},
+        fieldExtractionStats: {},
+      };
+
+      // Initialize field stats
+      Object.keys(jsonPath.fieldPaths).forEach((fieldName) => {
+        debugInfo.fieldExtractionStats![fieldName] = {
+          success: 0,
+          failed: 0,
+          nullCount: 0,
+        };
+      });
+
+      const results = rootData.map((item) => {
         const itemResult: Record<string, any> = {};
         Object.entries(jsonPath.fieldPaths).forEach(([fieldName, path]) => {
-          const results = JSONPath({ path, json: item });
-          if (results.length > 0) {
-            itemResult[fieldName] = results[0];
+          const pathResults = JSONPath({ path, json: item });
+          const stats = debugInfo.fieldExtractionStats![fieldName];
+          if (pathResults.length > 0) {
+            itemResult[fieldName] = pathResults[0];
+            if (stats) {
+              stats.success++;
+            }
           } else {
             itemResult[fieldName] = null;
+            if (stats) {
+              stats.failed++;
+              stats.nullCount++;
+            }
           }
         });
         return itemResult;
       });
+
+      debugInfo.itemsExtracted = results.length;
+      logExtractionDebugInfo(debugInfo);
+
+      return results;
     }
     // If rootData is an object, try to find array in it
     const arrayPath = jsonPath.rootPath || "$";
@@ -459,6 +489,33 @@ function extractFromHTML(
       `Found ${containers.length} container elements with selector: ${cleanContainerSelector}`
     );
 
+    // Initialize debug info
+    const debugInfo: ExtractionDebugInfo = {
+      containerCount: containers.length,
+      selectorMatches: {},
+      fieldExtractionStats: {},
+    };
+
+    // Count selector matches
+    Object.entries(extraction.selectors).forEach(
+      ([fieldName, fieldSelector]) => {
+        try {
+          const parsed = parseSelector(fieldSelector);
+          const matches = containers.find(parsed.selector).length;
+          debugInfo.selectorMatches![fieldName] = matches;
+        } catch (error) {
+          debugInfo.selectorMatches![fieldName] = 0;
+        }
+
+        // Initialize field stats
+        debugInfo.fieldExtractionStats![fieldName] = {
+          success: 0,
+          failed: 0,
+          nullCount: 0,
+        };
+      }
+    );
+
     containers.each((_, element) => {
       const $element = $(element);
       const item: Record<string, any> = {};
@@ -466,16 +523,38 @@ function extractFromHTML(
       Object.entries(extraction.selectors).forEach(
         ([fieldName, fieldSelector]) => {
           try {
-            item[fieldName] = extractField($element, fieldSelector);
+            const value = extractField($element, fieldSelector);
+            item[fieldName] = value;
+
+            // Update stats
+            const stats = debugInfo.fieldExtractionStats![fieldName];
+            if (stats) {
+              if (value === null || value === undefined) {
+                stats.nullCount++;
+                stats.failed++;
+              } else {
+                stats.success++;
+              }
+            }
           } catch (error) {
             console.warn(`Error extracting field "${fieldName}":`, error);
             item[fieldName] = null;
+            const errorStats = debugInfo.fieldExtractionStats![fieldName];
+            if (errorStats) {
+              errorStats.failed++;
+              errorStats.nullCount++;
+            }
           }
         }
       );
 
       results.push(item);
     });
+
+    debugInfo.itemsExtracted = results.length;
+
+    // Log debug info
+    logExtractionDebugInfo(debugInfo);
 
     console.log(`Extracted ${results.length} items`);
     return results;
