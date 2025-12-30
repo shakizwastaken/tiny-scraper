@@ -3,108 +3,13 @@ import {
   scrapeWithInstructions,
   type PaginationOptions,
 } from "./scraper.service";
-import { getScrapingInstructions, saveTestResult } from "./storage.service";
+import {
+  getScrapingInstructions,
+  saveTestResult,
+  updateScrapingInstructions,
+} from "./storage.service";
 import { logPaginationDebugInfo } from "./debug.service";
-
-/**
- * Validate extracted data against JSON schema
- */
-function validateAgainstSchema(
-  data: any,
-  schema: ScrapingInstructions["schema"]
-): { valid: boolean; errors: string[]; missingFields: string[] } {
-  const errors: string[] = [];
-  const missingFields: string[] = [];
-
-  // Helper to validate a value against a schema property
-  const validateProperty = (
-    value: any,
-    propSchema: any,
-    fieldName: string
-  ): void => {
-    if (propSchema.required && propSchema.required.includes(fieldName)) {
-      if (value === null || value === undefined || value === "") {
-        missingFields.push(fieldName);
-      }
-    }
-
-    if (value === null || value === undefined) {
-      return; // Null values are allowed unless required
-    }
-
-    if (propSchema.type) {
-      const expectedType = propSchema.type;
-      const actualType = Array.isArray(value)
-        ? "array"
-        : typeof value === "object" && value !== null
-        ? "object"
-        : typeof value;
-
-      if (expectedType === "array" && !Array.isArray(value)) {
-        errors.push(`Field "${fieldName}": expected array, got ${actualType}`);
-      } else if (
-        expectedType === "object" &&
-        (actualType !== "object" || Array.isArray(value))
-      ) {
-        errors.push(`Field "${fieldName}": expected object, got ${actualType}`);
-      } else if (
-        !["array", "object"].includes(expectedType) &&
-        actualType !== expectedType
-      ) {
-        errors.push(
-          `Field "${fieldName}": expected ${expectedType}, got ${actualType}`
-        );
-      }
-    }
-
-    // Validate format for strings
-    if (propSchema.format && typeof value === "string") {
-      if (propSchema.format === "uri" && !value.startsWith("http")) {
-        errors.push(`Field "${fieldName}": expected URI format`);
-      }
-      // Add more format validations as needed
-    }
-  };
-
-  if (schema.type === "array") {
-    if (!Array.isArray(data)) {
-      errors.push("Expected array output, but got non-array");
-      return { valid: false, errors, missingFields };
-    }
-
-    if (data.length === 0) {
-      errors.push("Array is empty - no data extracted");
-      return { valid: false, errors, missingFields };
-    }
-
-    // Validate first item (sample)
-    if (schema.items && schema.items.properties) {
-      const firstItem = data[0];
-      Object.entries(schema.items.properties).forEach(
-        ([fieldName, propSchema]) => {
-          validateProperty(firstItem[fieldName], propSchema, fieldName);
-        }
-      );
-    }
-  } else if (schema.type === "object") {
-    if (Array.isArray(data) || typeof data !== "object" || data === null) {
-      errors.push("Expected object output, but got non-object");
-      return { valid: false, errors, missingFields };
-    }
-
-    if (schema.properties) {
-      Object.entries(schema.properties).forEach(([fieldName, propSchema]) => {
-        validateProperty(data[fieldName], propSchema, fieldName);
-      });
-    }
-  }
-
-  return {
-    valid: errors.length === 0 && missingFields.length === 0,
-    errors,
-    missingFields,
-  };
-}
+import { generateSchemaFromData } from "../utils/schema-generator";
 
 /**
  * Test scraping instructions by executing them
@@ -122,10 +27,11 @@ export async function testInstructions(id: string): Promise<TestResults> {
       };
     }
 
-    const { instructions } = metadata;
+    let instructions = metadata.instructions;
 
     // Capture actual HTML response for debugging (if HTML/XML)
     let actualHtmlResponse: string | undefined;
+    let containerHtmlSamples: string[] | undefined;
     if (
       instructions.responseType === "html" ||
       instructions.responseType === "xml"
@@ -162,6 +68,49 @@ export async function testInstructions(id: string): Promise<TestResults> {
           console.log(
             `📄 Captured HTML response (${actualHtmlResponse.length} chars)`
           );
+
+          // Extract container HTML samples if we have a containerSelector
+          if (
+            instructions.outputType === "array" &&
+            instructions.extraction?.containerSelector
+          ) {
+            try {
+              const cheerio = await import("cheerio");
+              const $ = cheerio.load(actualHtmlResponse);
+              const containerSelector =
+                instructions.extraction.containerSelector
+                  .replace(/::text\b/g, "")
+                  .replace(/::html\b/g, "")
+                  .replace(/::attr\([^)]*\)/g, "")
+                  .trim();
+              const containers = $(containerSelector);
+
+              containerHtmlSamples = [];
+              const maxSamples = 3;
+              const maxLengthPerSample = 2000;
+
+              for (
+                let i = 0;
+                i < Math.min(containers.length, maxSamples);
+                i++
+              ) {
+                const containerHtml = $(containers[i]).html() || "";
+                containerHtmlSamples.push(
+                  containerHtml.substring(0, maxLengthPerSample)
+                );
+              }
+
+              console.log(
+                `📦 Extracted ${containerHtmlSamples.length} container HTML samples`
+              );
+            } catch (error) {
+              console.log(
+                `⚠️  Failed to extract container HTML: ${
+                  error instanceof Error ? error.message : String(error)
+                }`
+              );
+            }
+          }
         }
       } catch (error) {
         console.log(
@@ -199,11 +148,29 @@ export async function testInstructions(id: string): Promise<TestResults> {
       } item(s)`
     );
 
-    // Validate against schema
-    const validation = validateAgainstSchema(
-      extractedData,
-      instructions.schema
-    );
+    // Generate schema from extracted data and update instructions if schema doesn't exist
+    if (
+      !instructions.schema &&
+      extractedData !== null &&
+      extractedData !== undefined
+    ) {
+      const schema = generateSchemaFromData(extractedData);
+      const updatedInstructions: ScrapingInstructions = {
+        ...instructions,
+        schema,
+      };
+      // Update instructions in database
+      await updateScrapingInstructions(id, updatedInstructions);
+      instructions = updatedInstructions;
+      console.log("   ✅ Schema generated from extracted data");
+    }
+
+    // Basic validation - just check if we got data
+    const hasData = extractedData !== null && extractedData !== undefined;
+    const hasItems = Array.isArray(extractedData)
+      ? extractedData.length > 0
+      : true;
+    const success = hasData && hasItems;
 
     // Prepare sample data (limit size for debugging)
     let dataSample = extractedData;
@@ -212,18 +179,9 @@ export async function testInstructions(id: string): Promise<TestResults> {
     }
 
     const testResults: TestResults = {
-      success:
-        validation.valid &&
-        extractedData !== null &&
-        extractedData !== undefined,
+      success,
       extractedData: dataSample,
-      errors: validation.errors.length > 0 ? validation.errors : undefined,
-      schemaValidationErrors:
-        validation.errors.length > 0 ? validation.errors : undefined,
-      requiredFieldsMissing:
-        validation.missingFields.length > 0
-          ? validation.missingFields
-          : undefined,
+      errors: !success ? ["No data extracted or empty result"] : undefined,
       debugInfo: {
         totalItems: Array.isArray(extractedData) ? extractedData.length : 1,
         outputType: instructions.outputType,
@@ -233,6 +191,7 @@ export async function testInstructions(id: string): Promise<TestResults> {
           ? actualHtmlResponse.substring(0, 10000)
           : undefined, // First 10KB for agent analysis
         htmlLength: actualHtmlResponse?.length,
+        containerHtmlSamples: containerHtmlSamples,
       },
     };
 
@@ -242,14 +201,6 @@ export async function testInstructions(id: string): Promise<TestResults> {
       console.log(`❌ Test failed`);
       if (testResults.errors && testResults.errors.length > 0) {
         console.log(`   Errors: ${testResults.errors.join(", ")}`);
-      }
-      if (
-        testResults.requiredFieldsMissing &&
-        testResults.requiredFieldsMissing.length > 0
-      ) {
-        console.log(
-          `   Missing fields: ${testResults.requiredFieldsMissing.join(", ")}`
-        );
       }
     }
 

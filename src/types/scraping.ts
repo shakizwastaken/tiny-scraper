@@ -34,8 +34,8 @@ export interface ScrapingInstructions {
     fieldPaths: Record<string, string>; // Field -> JSONPath mapping
   };
 
-  // Output schema (JSON Schema format)
-  schema: JSONSchema;
+  // Output schema (JSON Schema format) - generated automatically from extracted data
+  schema?: JSONSchema;
 
   // Pagination
   pagination?: {
@@ -82,8 +82,6 @@ export interface TestResults {
   success: boolean;
   extractedData?: any; // Sample of extracted data
   errors?: string[];
-  schemaValidationErrors?: string[];
-  requiredFieldsMissing?: string[];
   debugInfo?: Record<string, any>;
   paginationTestResult?: {
     tested: boolean;
@@ -115,6 +113,7 @@ export interface ExtractionDebugInfo {
   >;
   containerCount?: number;
   itemsExtracted?: number;
+  containerHtmlSamples?: string[]; // Sample HTML from container elements (first 3 containers, max 2000 chars each)
 }
 
 export interface RequestSelectionResult {

@@ -321,14 +321,6 @@ async function runTestingAndRefinementLoop(
       if (testResults.errors && testResults.errors.length > 0) {
         console.log(`  Errors: ${testResults.errors.join(", ")}`);
       }
-      if (
-        testResults.requiredFieldsMissing &&
-        testResults.requiredFieldsMissing.length > 0
-      ) {
-        console.log(
-          `  Missing Fields: ${testResults.requiredFieldsMissing.join(", ")}`
-        );
-      }
 
       // Send to refinement service
       try {

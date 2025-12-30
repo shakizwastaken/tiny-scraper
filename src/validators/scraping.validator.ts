@@ -19,9 +19,6 @@ export function validateScrapingInstructions(
   if (!instructions.outputType) {
     throw new Error("Missing required field: outputType");
   }
-  if (!instructions.schema) {
-    throw new Error("Missing required field: schema");
-  }
 
   // Validate responseType
   if (!["json", "html", "xml"].includes(instructions.responseType)) {
@@ -37,11 +34,14 @@ export function validateScrapingInstructions(
     );
   }
 
-  // Validate schema type matches outputType
-  if (instructions.schema.type !== instructions.outputType) {
-    throw new Error(
-      `Schema type (${instructions.schema.type}) does not match outputType (${instructions.outputType})`
-    );
+  // Schema is optional - it will be generated automatically from extracted data
+  if (instructions.schema) {
+    // Validate schema type matches outputType if schema is provided
+    if (instructions.schema.type !== instructions.outputType) {
+      throw new Error(
+        `Schema type (${instructions.schema.type}) does not match outputType (${instructions.outputType})`
+      );
+    }
   }
 
   // Validate extraction for HTML/XML
@@ -83,19 +83,21 @@ export function validateScrapingInstructions(
     }
   }
 
-  // Validate schema structure
-  if (instructions.schema.type === "array") {
-    if (!instructions.schema.items) {
-      throw new Error("Schema type is array but items schema is missing");
-    }
-  } else if (instructions.schema.type === "object") {
-    if (
-      !instructions.schema.properties ||
-      Object.keys(instructions.schema.properties).length === 0
-    ) {
-      throw new Error(
-        "Schema type is object but properties are missing or empty"
-      );
+  // Validate schema structure if schema is provided
+  if (instructions.schema) {
+    if (instructions.schema.type === "array") {
+      if (!instructions.schema.items) {
+        throw new Error("Schema type is array but items schema is missing");
+      }
+    } else if (instructions.schema.type === "object") {
+      if (
+        !instructions.schema.properties ||
+        Object.keys(instructions.schema.properties).length === 0
+      ) {
+        throw new Error(
+          "Schema type is object but properties are missing or empty"
+        );
+      }
     }
   }
 

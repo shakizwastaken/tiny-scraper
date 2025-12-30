@@ -122,13 +122,13 @@ ${
 }
 ${responseContent}
 
-CRITICAL REQUIREMENTS - Generate a complete JSON object with ALL of the following:
+CRITICAL REQUIREMENTS - Generate a complete JSON object with the following:
 
 1. RESPONSE TYPE & OUTPUT TYPE:
    - "responseType": "${responseType}" (json, html, or xml)
    - "outputType": "array" or "object" (explicitly indicate if response is an array of items or a single object)
 
-2. DATA EXTRACTION INSTRUCTIONS:
+2. DATA EXTRACTION - SELECTORS ONLY:
 
    For HTML/XML responses:
    - "extraction" object with:
@@ -147,33 +147,9 @@ CRITICAL REQUIREMENTS - Generate a complete JSON object with ALL of the followin
      - "fieldPaths": Object mapping field names to JSONPath expressions
        * Format: "fieldName": "$.path.to.field" or "$.array[*].field"
 
-3. JSON SCHEMA (REQUIRED):
-   Generate a complete JSON Schema following JSON Schema Draft 7+ specification:
-   - "schema" object with:
-     - "type": "array" or "object" (must match outputType)
-     - If "array": include "items" with schema for each item
-     - If "object": include "properties" with schema for each property
-     - Include "required" array listing required fields
-     - For each property, include: "type" (string, number, boolean, object, array)
-     - For strings: optionally include "format" (uri, email, date-time, etc.)
-     - For nested objects: include full nested schema
-     - For arrays: include "items" schema
+   NOTE: The schema will be automatically generated from the extracted data. You only need to provide the selectors.
 
-   Example for array output:
-   {
-     "type": "array",
-     "items": {
-       "type": "object",
-       "properties": {
-         "title": { "type": "string" },
-         "price": { "type": "number" },
-         "url": { "type": "string", "format": "uri" }
-       },
-       "required": ["title", "price"]
-     }
-   }
-
-4. PAGINATION (REQUIRED if pagination exists, otherwise omit entirely):
+3. PAGINATION (only if pagination exists, otherwise omit entirely):
    CRITICAL: Only include pagination if you can clearly identify pagination patterns. If uncertain, omit it.
    
    If pagination is detected:
@@ -200,7 +176,7 @@ CRITICAL REQUIREMENTS - Generate a complete JSON object with ALL of the followin
    
    If NO pagination exists, do NOT include the "pagination" field at all.
 
-5. REQUEST STRUCTURE:
+4. REQUEST STRUCTURE:
    - "body": structure with placeholders (if POST/PUT/PATCH)
    - "queryParams": structure with placeholders
    - "headers": dynamic and static headers
@@ -208,11 +184,11 @@ CRITICAL REQUIREMENTS - Generate a complete JSON object with ALL of the followin
 IMPORTANT:
 - Use placeholders like {{page}}, {{offset}}, {{limit}}, {{cursor}} for dynamic values
 - Be extremely precise with selectors - they must work for actual scraping
-- Schema must accurately represent the data structure
 - For HTML arrays, containerSelector is REQUIRED
+- You only need to provide SELECTORS - the schema will be generated automatically from extracted data
 - Return ONLY valid JSON, no markdown, no code blocks, no explanations
 
-Expected JSON structure:
+Expected JSON structure (schema is NOT needed):
 {
   "method": "${method}",
   "baseUrl": "${baseUrl}",
@@ -226,7 +202,7 @@ Expected JSON structure:
       "field1": "$.path.to.field1",
       "field2": "$.path.to.field2"
     }
-  },`
+  }`
       : `"extraction": {
     "type": "css",
     "containerSelector": ".item-selector",
@@ -234,13 +210,9 @@ Expected JSON structure:
       "field1": ".field1-selector::text",
       "field2": ".field2-selector::attr(data-value)"
     }
-  },`
-  }
-  "schema": {
-    "type": "array" | "object",
-    ...
+  }`
   },
-  "pagination": { ... },
+  "pagination": { ... } (only if pagination exists),
   "body": { ... },
   "queryParams": { ... },
   "headers": { ... }
@@ -253,7 +225,7 @@ Expected JSON structure:
         {
           role: "system",
           content:
-            "You are an expert API analyst. Generate comprehensive JSON scraping instructions based on API responses. Always return valid JSON only. Include complete JSON schemas, precise selectors, and all required fields.",
+            "You are an expert API analyst. Generate JSON scraping instructions based on API responses. You only need to provide selectors for data extraction - the schema will be generated automatically. Always return valid JSON only.",
         },
         {
           role: "user",
@@ -275,8 +247,11 @@ Expected JSON structure:
     const instructions = JSON.parse(jsonText) as ScrapingInstructions;
     console.log("   ✅ Scraping instructions parsed successfully");
 
-    // Validate schema
+    // Validate structure (but schema is optional)
     validateScrapingInstructions(instructions);
+
+    // Schema will be generated automatically when we first extract data
+    // For now, we just return the instructions with selectors
 
     return instructions;
   } catch (error) {

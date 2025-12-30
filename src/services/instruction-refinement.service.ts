@@ -5,6 +5,7 @@ import {
 } from "../types";
 import { openai, OPENAI_REFINEMENT_MODEL, OPENAI_MAX_TOKENS } from "../config";
 import { validateScrapingInstructions } from "../validators/scraping.validator";
+import { generateSchemaFromData } from "../utils/schema-generator";
 
 export interface ConversationMessage {
   role: "system" | "user" | "assistant";
@@ -28,18 +29,30 @@ export async function refineInstructions(
   console.log(`Model: ${OPENAI_REFINEMENT_MODEL}`);
   console.log(`Conversation history length: ${conversationHistory.length}`);
 
-  // Build the user message with test results and current instructions
+  // Build the user message with test results and current selectors
   const testResultsSummary = {
     success: testResults.success,
     errors: testResults.errors || [],
-    schemaValidationErrors: testResults.schemaValidationErrors || [],
-    requiredFieldsMissing: testResults.requiredFieldsMissing || [],
     extractedDataSample: testResults.extractedData,
     debugInfo: testResults.debugInfo,
     paginationTestResult: testResults.paginationTestResult,
   };
 
-  // Include HTML response if available (for debugging selector issues)
+  // Extract only selectors from instructions (not schema)
+  const selectorsOnly = {
+    method: instructions.method,
+    baseUrl: instructions.baseUrl,
+    responseType: instructions.responseType,
+    outputType: instructions.outputType,
+    extraction: instructions.extraction,
+    jsonPath: instructions.jsonPath,
+    pagination: instructions.pagination,
+    body: instructions.body,
+    queryParams: instructions.queryParams,
+    headers: instructions.headers,
+  };
+
+  // Include HTML response and container samples if available (for debugging selector issues)
   let htmlContext = "";
   if (
     testResults.debugInfo?.actualHtmlResponse &&
@@ -52,6 +65,29 @@ ACTUAL HTML RESPONSE (first ${testResults.debugInfo.htmlLength || 0} chars):
 This is the actual HTML that was returned when testing the instructions. Use this to verify if selectors are correct.
 ${testResults.debugInfo.actualHtmlResponse.substring(0, 5000)}
 ${(testResults.debugInfo.htmlLength || 0) > 5000 ? "\n... (truncated)" : ""}`;
+
+    // Include container HTML samples if available
+    if (
+      instructions.outputType === "array" &&
+      instructions.extraction?.containerSelector &&
+      testResults.debugInfo.containerHtmlSamples &&
+      testResults.debugInfo.containerHtmlSamples.length > 0
+    ) {
+      htmlContext += `\n
+CONTAINER SELECTOR: "${instructions.extraction.containerSelector}"
+CONTAINER HTML SAMPLES (first ${
+        testResults.debugInfo.containerHtmlSamples.length
+      } containers):
+These are the actual HTML elements that matched the containerSelector. Use these to verify if the containerSelector is correct.
+${testResults.debugInfo.containerHtmlSamples
+  .map(
+    (sample: string, index: number) =>
+      `\n--- Container ${index + 1} ---\n${sample}${
+        sample.length >= 2000 ? "\n... (truncated)" : ""
+      }`
+  )
+  .join("\n")}`;
+    }
   }
 
   const userMessage = `I have tested the scraping instructions and here are the results:
@@ -59,8 +95,10 @@ ${(testResults.debugInfo.htmlLength || 0) > 5000 ? "\n... (truncated)" : ""}`;
 TEST RESULTS:
 ${JSON.stringify(testResultsSummary, null, 2)}${htmlContext}
 
-CURRENT INSTRUCTIONS:
-${JSON.stringify(instructions, null, 2)}
+CURRENT SELECTORS:
+${JSON.stringify(selectorsOnly, null, 2)}
+
+NOTE: You only need to modify the SELECTORS (extraction.selectors or jsonPath.fieldPaths). The schema is automatically generated from extracted data, so you don't need to provide it.
 
 ${
   instructions.pagination
@@ -75,19 +113,20 @@ ${
      you should add a pagination object.`
 }
 
-Please analyze the test results and the current instructions. 
+Please analyze the test results and the current selectors. 
 
-If the instructions work correctly (test passed, all required fields present, no errors), respond with:
+If the selectors work correctly (test passed, data extracted successfully), respond with:
 {"ok": true}
 
-If the instructions need modification, respond with:
-{"ok": false, "modification": {<complete updated instructions JSON>}, "reason": "<brief explanation of what was fixed>"}
+If the selectors need modification, respond with:
+{"ok": false, "modification": {<complete updated selectors JSON - same structure as CURRENT SELECTORS>}, "reason": "<brief explanation of what was fixed>"}
 
 IMPORTANT:
 - Return ONLY valid JSON, no markdown, no code blocks, no explanations outside the JSON
-- The "modification" must be a complete, valid ScrapingInstructions object
-- If modifying, ensure all required fields are included
-- Keep the same structure and format as the original instructions`;
+- The "modification" must have the same structure as CURRENT SELECTORS (but with updated selectors)
+- You only need to modify the SELECTORS - do NOT include a schema field
+- The schema will be automatically generated from the extracted data
+- If modifying, ensure all required fields are included (method, baseUrl, responseType, outputType, and either extraction or jsonPath)`;
 
   // Add user message to history
   const updatedHistory: ConversationMessage[] = [
@@ -193,16 +232,17 @@ export function initializeConversationHistory(): ConversationMessage[] {
       content: `You are an expert at analyzing and refining web scraping instructions. Your task is to review test results from executing scraping instructions and determine if they need to be modified.
 
 When test results show:
-- Success: All data extracted correctly, schema validation passes, all required fields present, pagination works (if configured) → Respond with {"ok": true}
-- Failures: Errors in extraction, schema validation failures, missing required fields, pagination not working → Respond with {"modification": {<updated instructions>}, "reason": "<explanation>"}
+- Success: Data extracted correctly, pagination works (if configured) → Respond with {"ok": true}
+- Failures: Errors in extraction, no data extracted, pagination not working → Respond with {"modification": {<updated selectors>}, "reason": "<explanation>"}
 
 Pay special attention to:
 - Field extraction statistics in debugInfo (selector matches, success rates)
 - Pagination test results (if paginationTestResult shows failures, fix pagination configuration)
-- Required fields that are missing (ensure selectors are correct)
-- Schema validation errors (fix field types or selectors)
+- Whether data was extracted successfully (check extractedDataSample)
+- Selector effectiveness (check debugInfo for match counts)
 
-Always return valid JSON only. The modification must be a complete, valid ScrapingInstructions object that fixes the issues found in the test results.`,
+IMPORTANT: You only need to modify SELECTORS. Do NOT include a schema field - it will be generated automatically.
+Always return valid JSON only. The modification must have the same structure as the selectors (extraction/jsonPath, etc.) but with updated selector values.`,
     },
   ];
 }

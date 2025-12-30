@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, jsonb, timestamp, boolean } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, jsonb, timestamp, boolean, integer } from "drizzle-orm/pg-core";
 import type { ScrapingInstructions, TestResults } from "../types/scraping";
 
 /**
@@ -42,10 +42,21 @@ export const testResults = pgTable("test_results", {
   success: boolean("success").notNull(),
   extractedData: jsonb("extracted_data"), // Sample of extracted data
   errors: jsonb("errors").$type<string[]>(),
-  schemaValidationErrors: jsonb("schema_validation_errors").$type<string[]>(),
-  requiredFieldsMissing: jsonb("required_fields_missing").$type<string[]>(),
   debugInfo: jsonb("debug_info").$type<Record<string, any>>(),
   testedAt: timestamp("tested_at").defaultNow().notNull(),
+});
+
+/**
+ * Table for storing instruction snapshots/versions
+ */
+export const instructionSnapshots = pgTable("instruction_snapshots", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  instructionId: uuid("instruction_id")
+    .references(() => scrapingInstructions.id, { onDelete: "cascade" })
+    .notNull(),
+  version: integer("version").notNull(), // Version number (1, 2, 3, etc.)
+  instructions: jsonb("instructions").$type<ScrapingInstructions>().notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
 export type ScrapingInstruction = typeof scrapingInstructions.$inferSelect;
@@ -54,4 +65,6 @@ export type ScrapeResult = typeof scrapeResults.$inferSelect;
 export type NewScrapeResult = typeof scrapeResults.$inferInsert;
 export type TestResult = typeof testResults.$inferSelect;
 export type NewTestResult = typeof testResults.$inferInsert;
+export type InstructionSnapshot = typeof instructionSnapshots.$inferSelect;
+export type NewInstructionSnapshot = typeof instructionSnapshots.$inferInsert;
 
