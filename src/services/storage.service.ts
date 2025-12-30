@@ -94,6 +94,31 @@ export function saveScrapingInstructions(
 }
 
 /**
+ * Update existing scraping instructions
+ */
+export function updateScrapingInstructions(
+  id: string,
+  instructions: ScrapingInstructions
+): void {
+  const storage = readStorage();
+  const existing = storage[id];
+
+  if (!existing) {
+    throw new Error(`Instructions not found for ID: ${id}`);
+  }
+
+  // Update instructions while preserving metadata
+  storage[id] = {
+    ...existing,
+    instructions,
+  };
+
+  writeStorage(storage);
+
+  console.log(`✅ Updated scraping instructions with ID: ${id}`);
+}
+
+/**
  * Get scraping instructions by ID
  */
 export function getScrapingInstructions(

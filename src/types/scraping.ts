@@ -78,3 +78,17 @@ export interface InterceptedRequest {
   responseBody?: string;
 }
 
+export interface TestResults {
+  success: boolean;
+  extractedData?: any; // Sample of extracted data
+  errors?: string[];
+  schemaValidationErrors?: string[];
+  requiredFieldsMissing?: string[];
+  debugInfo?: Record<string, any>;
+}
+
+export interface RefinementResponse {
+  ok: boolean;
+  modification?: ScrapingInstructions;
+  reason?: string; // Optional explanation
+}
