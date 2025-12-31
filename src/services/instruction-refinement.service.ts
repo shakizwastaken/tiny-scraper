@@ -122,11 +122,12 @@ If the selectors need modification, respond with:
 {"ok": false, "modification": {<complete updated selectors JSON - same structure as CURRENT SELECTORS>}, "reason": "<brief explanation of what was fixed>"}
 
 IMPORTANT:
-- Return ONLY valid JSON, no markdown, no code blocks, no explanations outside the JSON
+- You're part of a bigger system that requires valid JSON ONLY, anything else will break the system.
 - The "modification" must have the same structure as CURRENT SELECTORS (but with updated selectors)
 - You only need to modify the SELECTORS - do NOT include a schema field
 - The schema will be automatically generated from the extracted data
-- If modifying, ensure all required fields are included (method, baseUrl, responseType, outputType, and either extraction or jsonPath)`;
+- If modifying, ensure all required fields are included (method, baseUrl, responseType, outputType, and either extraction or jsonPath)
+- Ensure pagination and headers are at the root level of modification, NOT nested inside extraction`;
 
   // Add user message to history
   const updatedHistory: ConversationMessage[] = [
@@ -143,15 +144,21 @@ IMPORTANT:
       })),
       max_tokens: OPENAI_MAX_TOKENS,
       temperature: 0.3,
+      response_format: { type: "json_object" },
     });
 
     const responseText = completion.choices[0]?.message?.content?.trim() || "";
     console.log(`✅ Agent response received (${responseText.length} chars)`);
 
-    // Try to extract JSON from response (handle markdown code blocks if present)
+    // Extract JSON from response
+    // With JSON Mode, response should be pure JSON, but we handle markdown code blocks as fallback
     let jsonText = responseText;
     const jsonMatch = responseText.match(/```(?:json)?\s*(\{[\s\S]*\})\s*```/);
-    if (jsonMatch) jsonText = jsonMatch[1] || "";
+    if (jsonMatch) {
+      // Found markdown code block (shouldn't happen with JSON Mode, but handle it)
+      jsonText = jsonMatch[1] || "";
+      console.warn("⚠️  Found markdown code block in response (unexpected with JSON Mode)");
+    }
 
     // Parse the response
     let refinementResponse: RefinementResponse;
@@ -161,6 +168,20 @@ IMPORTANT:
       if (parsed.ok === true) {
         refinementResponse = { ok: true };
       } else if (parsed.modification) {
+        // Fix common structural issues: move pagination and headers out of extraction if nested incorrectly
+        if (parsed.modification.extraction) {
+          if (parsed.modification.extraction.pagination) {
+            console.warn("⚠️  Found pagination nested inside extraction, moving to root level");
+            parsed.modification.pagination = parsed.modification.extraction.pagination;
+            delete parsed.modification.extraction.pagination;
+          }
+          if (parsed.modification.extraction.headers) {
+            console.warn("⚠️  Found headers nested inside extraction, moving to root level");
+            parsed.modification.headers = parsed.modification.extraction.headers;
+            delete parsed.modification.extraction.headers;
+          }
+        }
+        
         // Validate the modified instructions
         try {
           validateScrapingInstructions(parsed.modification);
