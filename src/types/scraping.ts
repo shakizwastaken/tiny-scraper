@@ -130,3 +130,9 @@ export interface RequestSelectionResult {
     }
   >;
 }
+
+export interface IterationRecord {
+  iteration: number;
+  instructions: ScrapingInstructions;
+  testResults: TestResults;
+}

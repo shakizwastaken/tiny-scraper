@@ -10,7 +10,7 @@ import {
 import { openai } from "../config";
 import { FULL_RESPONSE_THRESHOLD } from "../config";
 import { selectBestRequest } from "../services/request-selector.service";
-import type { InterceptedRequest } from "../types/scraping";
+import type { InterceptedRequest, IterationRecord } from "../types/scraping";
 import {
   saveScrapingInstructions,
   updateScrapingInstructions,
@@ -21,6 +21,7 @@ import {
   initializeConversationHistory,
   type ConversationMessage,
 } from "../services/instruction-refinement.service";
+import { compareIterations } from "../utils/iteration-scorer";
 
 // Mutex to prevent concurrent refinement executions
 let refinementInProgress = false;
@@ -332,6 +333,7 @@ async function runTestingAndRefinementLoop(
     let conversationHistory: ConversationMessage[] =
       initializeConversationHistory();
     const maxIterations = 10;
+    const iterationHistory: IterationRecord[] = [];
 
     for (let iteration = 1; iteration <= maxIterations; iteration++) {
       console.log(`\n--- Iteration ${iteration}/${maxIterations} ---`);
@@ -348,6 +350,13 @@ async function runTestingAndRefinementLoop(
         console.log(`  Errors: ${testResults.errors.join(", ")}`);
       }
 
+      // Store this iteration in history
+      iterationHistory.push({
+        iteration,
+        instructions: currentInstructions,
+        testResults,
+      });
+
       // Send to refinement service
       try {
         const { response, updatedHistory } = await refineInstructions(
@@ -362,7 +371,7 @@ async function runTestingAndRefinementLoop(
           console.log(
             `\n✅ Instructions approved by agent after ${iteration} iteration(s)`
           );
-          // Final update with approved instructions
+          // Final update with approved instructions (this iteration is already the best since it passed)
           await updateScrapingInstructions(id, currentInstructions);
           return;
         }
@@ -386,23 +395,46 @@ async function runTestingAndRefinementLoop(
         );
         // Continue to next iteration or break based on error type
         if (iteration === maxIterations) {
-          throw new Error(
-            `Refinement failed after ${maxIterations} iterations: ${
-              error instanceof Error ? error.message : String(error)
-            }`
-          );
+          // We'll handle selection of best iteration below
+          break;
         }
       }
     }
 
     // If we reach here, max iterations reached
     console.log(
-      `\n⚠️  Maximum iterations (${maxIterations}) reached. Using last tested instructions.`
+      `\n⚠️  Maximum iterations (${maxIterations}) reached. Selecting best iteration from history.`
     );
-    await updateScrapingInstructions(id, currentInstructions);
-    throw new Error(
-      `Testing and refinement did not complete successfully after ${maxIterations} iterations`
+
+    if (iterationHistory.length === 0) {
+      throw new Error("No iterations were completed");
+    }
+
+    // Sort iterations by score (best first)
+    const sortedIterations = [...iterationHistory].sort(compareIterations);
+    const bestIteration = sortedIterations[0];
+
+    if (!bestIteration) {
+      throw new Error("Failed to select best iteration");
+    }
+
+    console.log(
+      `\n📊 Selected best iteration: #${bestIteration.iteration} (out of ${iterationHistory.length} iterations)`
     );
+    console.log(`   Test Results:`);
+    console.log(`     Success: ${bestIteration.testResults.success}`);
+    if (bestIteration.testResults.errors && bestIteration.testResults.errors.length > 0) {
+      console.log(`     Errors: ${bestIteration.testResults.errors.length}`);
+    }
+    if (bestIteration.testResults.debugInfo?.totalItems !== undefined) {
+      console.log(
+        `     Total Items: ${bestIteration.testResults.debugInfo.totalItems}`
+      );
+    }
+
+    // Update storage with the best iteration's instructions
+    await updateScrapingInstructions(id, bestIteration.instructions);
+    console.log(`✅ Best iteration instructions saved to storage`);
   } finally {
     refinementInProgress = false;
   }
