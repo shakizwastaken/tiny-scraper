@@ -578,6 +578,99 @@ function extractFromHTML(
       `Found ${containers.length} container elements with selector: ${cleanContainerSelector}`
     );
 
+    // Special handling for data-items attributes containing JSON
+    // Check if any container has a data-items attribute with JSON data
+    let dataItemsExtracted = false;
+    containers.each((_, element) => {
+      const $element = $(element);
+      const dataItemsAttr = $element.attr("data-items");
+
+      if (dataItemsAttr) {
+        try {
+          // Decode HTML entities
+          const decoded = dataItemsAttr
+            .replace(/&quot;/g, '"')
+            .replace(/&amp;/g, "&")
+            .replace(/&lt;/g, "<")
+            .replace(/&gt;/g, ">")
+            .replace(/&#39;/g, "'")
+            .replace(/&#x27;/g, "'")
+            .replace(/&#x2F;/g, "/");
+
+          // Parse JSON
+          const jsonData = JSON.parse(decoded);
+
+          if (Array.isArray(jsonData) && jsonData.length > 0) {
+            console.log(
+              `✅ Found ${jsonData.length} items in data-items attribute`
+            );
+            dataItemsExtracted = true;
+
+            // Map JSON data to results using field selectors
+            jsonData.forEach((item: any) => {
+              const resultItem: Record<string, any> = {};
+
+              Object.entries(extraction.selectors).forEach(
+                ([fieldName, fieldSelector]) => {
+                  try {
+                    // For data-items, we need to map CSS selectors to JSON properties
+                    // Strategy: Try fieldName first, then extract property from selector
+                    const parsed = parseSelector(fieldSelector);
+
+                    // If selector is a JSONPath-like expression, use it
+                    if (
+                      parsed.selector.startsWith("$.") ||
+                      parsed.selector.startsWith("$[")
+                    ) {
+                      const pathResults = JSONPath({
+                        path: parsed.selector,
+                        json: item,
+                      });
+                      resultItem[fieldName] =
+                        pathResults.length > 0 ? pathResults[0] : null;
+                    } else {
+                      // Try to extract property name from CSS selector
+                      // Remove common CSS selector prefixes (.class, #id, etc.)
+                      let propertyName = parsed.selector
+                        .replace(/^\./, "") // Remove leading dot
+                        .replace(/^#/, "") // Remove leading hash
+                        .replace(/\[.*?\]/g, "") // Remove attribute selectors
+                        .trim();
+
+                      // Try multiple property name variations
+                      resultItem[fieldName] =
+                        item[fieldName] || // Direct field name match
+                        item[propertyName] || // Property from selector
+                        item[parsed.selector] || // Full selector as property
+                        null;
+                    }
+                  } catch (error) {
+                    console.warn(
+                      `Error extracting field "${fieldName}" from data-items:`,
+                      error
+                    );
+                    resultItem[fieldName] = null;
+                  }
+                }
+              );
+
+              results.push(resultItem);
+            });
+          }
+        } catch (error) {
+          console.warn("Failed to parse data-items attribute:", error);
+        }
+      }
+    });
+
+    // If we extracted from data-items, return early
+    if (dataItemsExtracted) {
+      console.log(
+        `Extracted ${results.length} items from data-items attribute`
+      );
+      return results;
+    }
+
     // Initialize debug info
     const debugInfo: ExtractionDebugInfo = {
       containerCount: containers.length,

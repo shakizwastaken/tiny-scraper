@@ -136,6 +136,63 @@ export class BrowserService {
   }
 
   /**
+   * Scroll to bottom of page incrementally to trigger lazy-loaded content
+   * and capture any pagination requests
+   */
+  async scrollToBottom(page: Page, scrollDelay: number = 500): Promise<void> {
+    let previousHeight = 0;
+    let currentHeight = await page.evaluate(
+      // @ts-expect-error - document exists in browser context
+      () => document.body.scrollHeight
+    );
+    let scrollAttempts = 0;
+    const maxScrollAttempts = 50; // Prevent infinite scrolling
+
+    while (
+      currentHeight !== previousHeight &&
+      scrollAttempts < maxScrollAttempts
+    ) {
+      previousHeight = currentHeight;
+
+      // Scroll to bottom
+      await page.evaluate(() => {
+        // @ts-ignore - window and document exist in browser context
+        (window as any).scrollTo(0, (document as any).body.scrollHeight);
+      });
+
+      // Wait for content to load and network requests
+      await new Promise((resolve) => setTimeout(resolve, scrollDelay));
+
+      // Wait for network to be idle (Puppeteer approach)
+      try {
+        await page.waitForFunction(
+          // @ts-expect-error - document exists in browser context
+          () => document.readyState === "complete",
+          { timeout: 2000 }
+        );
+      } catch (e) {
+        // Timeout is okay, just continue
+      }
+
+      // Check new height
+      currentHeight = await page.evaluate(
+        // @ts-expect-error - document exists in browser context
+        () => document.body.scrollHeight
+      );
+      scrollAttempts++;
+    }
+
+    // Final scroll to ensure we're at the very bottom
+    await page.evaluate(() => {
+      // @ts-ignore - window and document exist in browser context
+      (window as any).scrollTo(0, (document as any).body.scrollHeight);
+    });
+
+    // Wait a bit more for any final requests
+    await new Promise((resolve) => setTimeout(resolve, RESPONSE_WAIT_TIME));
+  }
+
+  /**
    * Close the browser instance
    */
   async closeBrowser(): Promise<void> {

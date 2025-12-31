@@ -100,6 +100,10 @@ export function detectPaginationFromHTML(html: string): PaginationHints {
     /class[=\s]*["'][^"']*\bpager\b[^"']*["']/gi,
     /<button[^>]*\b(load|more|next|show)\b[^>]*>/gi,
     /<a[^>]*\b(load|more|next|show)\b[^>]*>/gi,
+    // Add AJAX pagination patterns
+    /data-type[=\s]*["']?ajax["']?/gi,
+    /data-items[=\s]*["']/gi,
+    /class[=\s]*["'][^"']*\bajax[^"']*["']/gi,
   ];
 
   let hasControls = false;
@@ -109,6 +113,45 @@ export function detectPaginationFromHTML(html: string): PaginationHints {
     if (pattern.test(html)) {
       hasControls = true;
       break;
+    }
+  }
+
+  // Check for data-items attribute with JSON data (AJAX pagination indicator)
+  const dataItemsPattern = /data-items[=\s]*["']([^"']+)["']/gi;
+  let dataItemsMatch;
+  const foundDataItems: string[] = [];
+
+  // Helper function to decode HTML entities
+  function decodeHtmlEntities(text: string): string {
+    return text
+      .replace(/&quot;/g, '"')
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&#39;/g, "'")
+      .replace(/&#x27;/g, "'")
+      .replace(/&#x2F;/g, "/");
+  }
+
+  while ((dataItemsMatch = dataItemsPattern.exec(html)) !== null) {
+    const dataItemsValue = dataItemsMatch[1];
+    if (dataItemsValue) {
+      // Decode HTML entities
+      const decoded = decodeHtmlEntities(dataItemsValue);
+
+      // Try to parse as JSON to verify it's valid
+      try {
+        const parsed = JSON.parse(decoded);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          foundDataItems.push(decoded);
+          hasControls = true; // This indicates pagination-capable content
+        }
+      } catch (e) {
+        // Not valid JSON, but still might indicate AJAX pagination
+        if (dataItemsValue.length > 50) {
+          hasControls = true;
+        }
+      }
     }
   }
 
@@ -172,6 +215,16 @@ export function detectPaginationFromHTML(html: string): PaginationHints {
 
   if (linkParams.size > 0) {
     hints.examples = Array.from(linkParams);
+  }
+
+  // If we found data-items with JSON, add a note about AJAX pagination
+  if (foundDataItems.length > 0) {
+    if (!hints.examples) {
+      hints.examples = [];
+    }
+    hints.examples.push(
+      `data-items (AJAX pagination detected - ${foundDataItems.length} data attribute(s) found)`
+    );
   }
 
   return hints;

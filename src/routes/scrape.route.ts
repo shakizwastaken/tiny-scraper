@@ -91,6 +91,11 @@ export async function scrapeHandler(
     // Navigate to URL
     await browserService.navigateToUrl(page, validUrl);
 
+    // Scroll to bottom to trigger lazy-loaded content and pagination requests
+    console.log("\n[5.5/6] Scrolling to bottom to trigger lazy-loaded content...");
+    await browserService.scrollToBottom(page);
+    console.log("✅ Scrolling complete");
+
     console.log("\n=== INTERCEPTION SUMMARY ===");
     console.log(
       `Total intercepted requests stored: ${interceptedRequests.length}`
@@ -100,6 +105,18 @@ export async function scrapeHandler(
     console.log("\n[6/6] Filtering requests by search term...");
     const searchLower = validSearch.toLowerCase();
     console.log(`   Search term (lowercase): "${searchLower}"`);
+
+    // Helper function to decode HTML entities
+    function decodeHtmlEntities(text: string): string {
+      return text
+        .replace(/&quot;/g, '"')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&#39;/g, "'")
+        .replace(/&#x27;/g, "'")
+        .replace(/&#x2F;/g, '/');
+    }
 
     const matchingRequests: InterceptedRequest[] = [];
 
@@ -119,7 +136,9 @@ export async function scrapeHandler(
         continue;
       }
 
-      const bodyLower = responseBody.toLowerCase();
+      // Decode HTML entities before searching
+      const decodedBody = decodeHtmlEntities(responseBody);
+      const bodyLower = decodedBody.toLowerCase();
       const containsSearch = bodyLower.includes(searchLower);
 
       console.log(`   Response body length: ${responseBody.length} chars`);

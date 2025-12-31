@@ -187,6 +187,22 @@ IMPORTANT:
       }
     } catch (parseError) {
       console.error(`❌ Failed to parse agent response:`, parseError);
+      console.error(`📄 Raw response text (${responseText.length} chars):`);
+      console.error(responseText);
+      console.error(`📄 Extracted JSON text (${jsonText.length} chars):`);
+      console.error(jsonText);
+      if (jsonText.length > 0) {
+        // Try to show where the error might be
+        const errorMessage = parseError instanceof Error ? parseError.message : String(parseError);
+        console.error(`🔍 Parse error: ${errorMessage}`);
+        // Show first and last 200 chars of JSON text for context
+        if (jsonText.length > 400) {
+          console.error(`📋 JSON preview (first 200 chars): ${jsonText.substring(0, 200)}...`);
+          console.error(`📋 JSON preview (last 200 chars): ...${jsonText.substring(jsonText.length - 200)}`);
+        } else {
+          console.error(`📋 Full JSON text: ${jsonText}`);
+        }
+      }
       throw new Error(
         `Failed to parse agent response: ${
           parseError instanceof Error ? parseError.message : String(parseError)
