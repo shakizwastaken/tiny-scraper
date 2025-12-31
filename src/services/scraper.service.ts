@@ -250,7 +250,7 @@ function filterValidHeaders(
  * - 403 errors (browser service fallback)
  * - 500 errors (exponential backoff retry)
  */
-export function hasWorkaround(error: Error): boolean {
+export function b(error: Error): boolean {
   const errorMessage = error.message;
 
   // Check for 403 Forbidden - has browser service fallback
@@ -259,14 +259,35 @@ export function hasWorkaround(error: Error): boolean {
   }
 
   // Check for 500-599 server errors - have exponential backoff retry
-  // Match patterns like "HTTP 500", "HTTP 502", "5xx", etc.
-  if (errorMessage.match(/HTTP\s+5\d{2}/) || errorMessage.match(/5\d{2}/)) {
-    return true;
+  // Match patterns like "HTTP 500", "HTTP 502", "500", "5xx", etc.
+  // Also handle wrapped messages like "Execution failed: HTTP 500..." or "Server error (500)"
+  if (
+    errorMessage.match(/HTTP\s+5\d{2}/i) ||
+    errorMessage.match(/\b5\d{2}\b/) ||
+    errorMessage.includes("Server error (5")
+  ) {
+    // If retries were exhausted, this workaround failed - return false to allow alternative request fallback
+    if (
+      errorMessage.includes("Failed after") ||
+      errorMessage.includes("retry attempts") ||
+      errorMessage.includes("retries exhausted")
+    ) {
+      return false; // Workaround exhausted, should try alternatives
+    }
+    return true; // Workaround available (not yet exhausted)
   }
 
   // Check for rate limiting (429) - has retry with backoff
   if (errorMessage.includes("429") || errorMessage.includes("Rate limited")) {
-    return true;
+    // Check if retries were exhausted
+    if (
+      errorMessage.includes("Failed after") ||
+      errorMessage.includes("retry attempts") ||
+      errorMessage.includes("retries exhausted")
+    ) {
+      return false; // Workaround exhausted, should try alternatives
+    }
+    return true; // Workaround available (not yet exhausted)
   }
 
   return false;
