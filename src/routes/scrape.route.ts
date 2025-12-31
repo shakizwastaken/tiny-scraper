@@ -423,7 +423,10 @@ async function runTestingAndRefinementLoop(
     );
     console.log(`   Test Results:`);
     console.log(`     Success: ${bestIteration.testResults.success}`);
-    if (bestIteration.testResults.errors && bestIteration.testResults.errors.length > 0) {
+    if (
+      bestIteration.testResults.errors &&
+      bestIteration.testResults.errors.length > 0
+    ) {
       console.log(`     Errors: ${bestIteration.testResults.errors.length}`);
     }
     if (bestIteration.testResults.debugInfo?.totalItems !== undefined) {
