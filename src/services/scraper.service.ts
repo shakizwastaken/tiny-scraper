@@ -245,6 +245,34 @@ function filterValidHeaders(
 }
 
 /**
+ * Check if an error has a workaround mechanism
+ * Returns true for errors that have built-in retry/fallback mechanisms:
+ * - 403 errors (browser service fallback)
+ * - 500 errors (exponential backoff retry)
+ */
+export function hasWorkaround(error: Error): boolean {
+  const errorMessage = error.message;
+
+  // Check for 403 Forbidden - has browser service fallback
+  if (errorMessage.includes("403") || errorMessage.includes("Forbidden")) {
+    return true;
+  }
+
+  // Check for 500-599 server errors - have exponential backoff retry
+  // Match patterns like "HTTP 500", "HTTP 502", "5xx", etc.
+  if (errorMessage.match(/HTTP\s+5\d{2}/) || errorMessage.match(/5\d{2}/)) {
+    return true;
+  }
+
+  // Check for rate limiting (429) - has retry with backoff
+  if (errorMessage.includes("429") || errorMessage.includes("Rate limited")) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
  * Make HTTP request based on instructions
  */
 async function makeRequest(

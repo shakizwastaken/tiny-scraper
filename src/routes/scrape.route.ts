@@ -22,6 +22,7 @@ import {
   type ConversationMessage,
 } from "../services/instruction-refinement.service";
 import { compareIterations } from "../utils/iteration-scorer";
+import { hasWorkaround } from "../services/scraper.service";
 
 // Mutex to prevent concurrent refinement executions
 let refinementInProgress = false;
@@ -79,6 +80,9 @@ export async function scrapeHandler(
   let scrapingInstructions: ScrapingInstructions | null = null;
   let gptError: string | undefined;
   let id: string | undefined;
+  // Store matching requests info for first iteration fallback
+  let matchingRequests: InterceptedRequest[] = [];
+  const failedRequestIndices: number[] = [];
 
   try {
     // Launch browser
@@ -120,7 +124,7 @@ export async function scrapeHandler(
         .replace(/&#x2F;/g, "/");
     }
 
-    const matchingRequests: InterceptedRequest[] = [];
+    matchingRequests = [];
 
     for (let i = 0; i < interceptedRequests.length; i++) {
       const intercepted = interceptedRequests[i];
@@ -159,124 +163,188 @@ export async function scrapeHandler(
     if (matchingRequests.length === 0) {
       console.log("   ❌ No matching requests found");
     } else {
-      // Select best request if multiple matches
-      let selectedRequest: InterceptedRequest;
-      if (matchingRequests.length > 1) {
-        console.log(
-          `\n=== SELECTING BEST REQUEST FROM ${matchingRequests.length} MATCHES ===`
-        );
-        const selectionResult = await selectBestRequest(
-          matchingRequests,
-          validSearch,
-          validExpectedOutputType,
-          validCustomPrompt
-        );
-        const candidate = matchingRequests[selectionResult.selectedIndex];
-        if (!candidate) {
-          throw new Error("Selected request index is invalid");
+      // Retry loop: try alternative requests if one fails (only during first generation)
+      let remainingMatches = [...matchingRequests];
+      let selectedRequest: InterceptedRequest | null = null;
+
+      while (remainingMatches.length > 0) {
+        try {
+          // Select best request from remaining matches
+          if (remainingMatches.length > 1) {
+            console.log(
+              `\n=== SELECTING BEST REQUEST FROM ${remainingMatches.length} REMAINING MATCHES ===`
+            );
+            const selectionResult = await selectBestRequest(
+              remainingMatches,
+              validSearch,
+              validExpectedOutputType,
+              validCustomPrompt
+            );
+            const candidate = remainingMatches[selectionResult.selectedIndex];
+            if (!candidate) {
+              throw new Error("Selected request index is invalid");
+            }
+            selectedRequest = candidate;
+            console.log(
+              `✅ Selected request #${selectionResult.selectedIndex + 1}: ${
+                selectionResult.reasoning
+              }`
+            );
+          } else {
+            const candidate = remainingMatches[0];
+            if (!candidate) {
+              throw new Error("No matching request available");
+            }
+            selectedRequest = candidate;
+            console.log(`✅ Using single remaining match`);
+          }
+
+          if (!selectedRequest) {
+            throw new Error("Failed to select a request");
+          }
+
+          const { request, response, responseBody } = selectedRequest;
+          const requestUrl = request.url();
+
+          console.log(
+            `\n   Processing selected request: ${request.method()} ${requestUrl}`
+          );
+
+          const requestHeaders: Record<string, string> = {};
+          const reqHeaders = request.headers();
+          Object.entries(reqHeaders).forEach(([key, value]) => {
+            requestHeaders[key] = value;
+          });
+
+          const method = request.method();
+          const postData = request.postData() || undefined;
+
+          // Get content type from response headers
+          const contentType = response
+            ? response.headers()["content-type"] || undefined
+            : undefined;
+
+          // Check if we should use full response passthrough
+          const useFullResponse = shouldUseFullPassthrough(
+            responseBody!,
+            FULL_RESPONSE_THRESHOLD
+          );
+
+          let context: string;
+          if (useFullResponse) {
+            console.log(
+              `   📄 Using full response passthrough (${
+                responseBody!.length
+              } chars < ${FULL_RESPONSE_THRESHOLD})`
+            );
+            context = responseBody!;
+          } else {
+            console.log(
+              `   ✂️  Extracting context (${
+                responseBody!.length
+              } chars >= ${FULL_RESPONSE_THRESHOLD})`
+            );
+            // Use conservative token limit to avoid TPM limit errors
+            // TPM limit is 400k, reserve space for prompt structure and output
+            context = extractContextAroundSearchTerm(
+              responseBody!,
+              validSearch,
+              350000 // Conservative limit to stay within 400k TPM limit
+            );
+          }
+
+          // Get response headers if available
+          const responseHeaders: Record<string, string> = {};
+          if (response) {
+            const respHeaders = response.headers();
+            Object.entries(respHeaders).forEach(([key, value]) => {
+              responseHeaders[key] = value;
+            });
+          }
+
+          // Generate scraping instructions with GPT
+          const instructions = await generateScrapingInstructions(
+            openai,
+            requestUrl,
+            method,
+            requestHeaders,
+            postData,
+            context,
+            contentType,
+            responseBody!,
+            useFullResponse,
+            validExpectedOutputType,
+            validCustomPrompt,
+            page,
+            responseHeaders
+          );
+
+          if (instructions) {
+            scrapingInstructions = instructions;
+            console.log(`   ✅ Scraping instructions generated successfully`);
+            // Success! Break out of retry loop
+            break;
+          } else {
+            throw new Error("generateScrapingInstructions returned null");
+          }
+        } catch (error) {
+          const errorObj =
+            error instanceof Error ? error : new Error(String(error));
+
+          // Check if error has a workaround (403 browser fallback, 500 retry, etc.)
+          if (hasWorkaround(errorObj)) {
+            console.log(
+              `   ⚠️  Error has workaround mechanism, not retrying with alternative request: ${errorObj.message}`
+            );
+            // Let the workaround handle it - throw the error to propagate
+            throw errorObj;
+          }
+
+          // No workaround available - remove failed request and try next one
+          console.log(
+            `   ❌ Failed to generate instructions for selected request: ${errorObj.message}`
+          );
+
+          if (remainingMatches.length === 1) {
+            // This was the last remaining request
+            console.log(`   ❌ All matching requests have been exhausted`);
+            gptError = errorObj.message;
+            break;
+          }
+
+          // Find the index of the failed request in remainingMatches
+          const failedIndex = remainingMatches.findIndex(
+            (match) => match === selectedRequest
+          );
+
+          if (failedIndex !== -1) {
+            // Track which request failed (relative to original matchingRequests)
+            const originalIndex = matchingRequests.findIndex(
+              (match) => match === remainingMatches[failedIndex]
+            );
+            if (
+              originalIndex !== -1 &&
+              !failedRequestIndices.includes(originalIndex)
+            ) {
+              failedRequestIndices.push(originalIndex);
+            }
+
+            // Remove failed request from remaining matches
+            remainingMatches = remainingMatches.filter(
+              (_, i) => i !== failedIndex
+            );
+            console.log(
+              `   🔄 Removing failed request, ${remainingMatches.length} request(s) remaining. Retrying...`
+            );
+          } else {
+            // Should not happen, but handle gracefully
+            console.log(
+              `   ⚠️  Could not find failed request in remaining matches`
+            );
+            gptError = errorObj.message;
+            break;
+          }
         }
-        selectedRequest = candidate;
-        console.log(
-          `✅ Selected request #${selectionResult.selectedIndex + 1}: ${
-            selectionResult.reasoning
-          }`
-        );
-      } else {
-        const candidate = matchingRequests[0];
-        if (!candidate) {
-          throw new Error("No matching request available");
-        }
-        selectedRequest = candidate;
-        console.log(`✅ Using single match`);
-      }
-
-      const { request, response, responseBody } = selectedRequest;
-      const requestUrl = request.url();
-
-      console.log(
-        `\n   Processing selected request: ${request.method()} ${requestUrl}`
-      );
-
-      const requestHeaders: Record<string, string> = {};
-      const reqHeaders = request.headers();
-      Object.entries(reqHeaders).forEach(([key, value]) => {
-        requestHeaders[key] = value;
-      });
-
-      const method = request.method();
-      const postData = request.postData() || undefined;
-
-      // Get content type from response headers
-      const contentType = response
-        ? response.headers()["content-type"] || undefined
-        : undefined;
-
-      // Check if we should use full response passthrough
-      const useFullResponse = shouldUseFullPassthrough(
-        responseBody!,
-        FULL_RESPONSE_THRESHOLD
-      );
-
-      let context: string;
-      if (useFullResponse) {
-        console.log(
-          `   📄 Using full response passthrough (${
-            responseBody!.length
-          } chars < ${FULL_RESPONSE_THRESHOLD})`
-        );
-        context = responseBody!;
-      } else {
-        console.log(
-          `   ✂️  Extracting context (${
-            responseBody!.length
-          } chars >= ${FULL_RESPONSE_THRESHOLD})`
-        );
-        // Use conservative token limit to avoid TPM limit errors
-        // TPM limit is 400k, reserve space for prompt structure and output
-        context = extractContextAroundSearchTerm(
-          responseBody!,
-          validSearch,
-          350000 // Conservative limit to stay within 400k TPM limit
-        );
-      }
-
-      // Get response headers if available
-      const responseHeaders: Record<string, string> = {};
-      if (response) {
-        const respHeaders = response.headers();
-        Object.entries(respHeaders).forEach(([key, value]) => {
-          responseHeaders[key] = value;
-        });
-      }
-
-      // Generate scraping instructions with GPT
-      try {
-        const instructions = await generateScrapingInstructions(
-          openai,
-          requestUrl,
-          method,
-          requestHeaders,
-          postData,
-          context,
-          contentType,
-          responseBody!,
-          useFullResponse,
-          validExpectedOutputType,
-          validCustomPrompt,
-          page,
-          responseHeaders
-        );
-
-        if (instructions) {
-          scrapingInstructions = instructions;
-          console.log(`   ✅ Scraping instructions generated successfully`);
-        }
-      } catch (error) {
-        gptError = error instanceof Error ? error.message : String(error);
-        console.error(
-          `   ❌ Failed to generate scraping instructions:`,
-          gptError
-        );
       }
     }
 
@@ -324,11 +392,25 @@ export async function scrapeHandler(
     // After browser is fully closed, run testing and refinement loop
     if (scrapingInstructions && !gptError && id) {
       try {
+        // Store matching requests info for first iteration fallback
+        // Note: We store URLs/metadata since Puppeteer objects can't be serialized
+        const matchingRequestsMetadata = matchingRequests.map(
+          (match, index) => ({
+            index,
+            url: match.request.url(),
+            method: match.request.method(),
+            hasFailed: failedRequestIndices.includes(index),
+          })
+        );
+
         await runTestingAndRefinementLoop(
           id,
           scrapingInstructions,
           validUrl,
-          validSearch
+          validSearch,
+          matchingRequestsMetadata.length > 1
+            ? matchingRequestsMetadata
+            : undefined
         );
       } catch (error) {
         console.error(
@@ -350,7 +432,13 @@ async function runTestingAndRefinementLoop(
   id: string,
   initialInstructions: ScrapingInstructions,
   originalUrl: string,
-  originalSearch: string
+  originalSearch: string,
+  matchingRequestsMetadata?: Array<{
+    index: number;
+    url: string;
+    method: string;
+    hasFailed: boolean;
+  }>
 ): Promise<void> {
   // Prevent concurrent executions
   if (refinementInProgress) {
@@ -382,6 +470,34 @@ async function runTestingAndRefinementLoop(
       console.log(`  Success: ${testResults.success}`);
       if (testResults.errors && testResults.errors.length > 0) {
         console.log(`  Errors: ${testResults.errors.join(", ")}`);
+      }
+
+      // Handle first iteration failures with alternative requests (if available)
+      if (
+        iteration === 1 &&
+        !testResults.success &&
+        testResults.errors &&
+        testResults.errors.length > 0 &&
+        matchingRequestsMetadata &&
+        matchingRequestsMetadata.length > 1
+      ) {
+        // Check if the error indicates no workaround
+        const errorMessage = testResults.errors[0] || "";
+        const errorObj = new Error(errorMessage);
+
+        if (!hasWorkaround(errorObj)) {
+          console.log(
+            `\n⚠️  First iteration test failed without workaround. Alternative requests were available but browser is closed.`
+          );
+          console.log(
+            `   This failure occurred during first generation testing - consider retrying the scrape request.`
+          );
+          // Note: We can't retry with alternative requests here because:
+          // 1. Browser is already closed
+          // 2. We don't have access to the original intercepted requests
+          // 3. The page state is lost
+          // The retry during instruction generation (above) handles the main case.
+        }
       }
 
       // Store this iteration in history
