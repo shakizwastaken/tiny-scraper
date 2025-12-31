@@ -40,6 +40,12 @@ export class PaginationTester {
         return result;
       }
 
+      // Check for rate limiting
+      if (page1Response.status === 429) {
+        result.error = "Rate limited (429)";
+        return result;
+      }
+
       const page1Data = await page1Response.text();
       result.page1Results = this.parseResponse(page1Data);
 
@@ -55,6 +61,12 @@ export class PaginationTester {
 
       if (!page2Response.ok) {
         result.error = `Page 2 request failed: ${page2Response.status}`;
+        return result;
+      }
+
+      // Check for rate limiting
+      if (page2Response.status === 429) {
+        result.error = "Rate limited (429) on page 2";
         return result;
       }
 
@@ -80,6 +92,315 @@ export class PaginationTester {
       result.error = error instanceof Error ? error.message : String(error);
       return result;
     }
+  }
+
+  /**
+   * Test cursor pagination with validation (cursor changes, no duplicates)
+   */
+  async testCursorPagination(
+    pattern: PaginationCandidate,
+    baseUrl: string,
+    method: string,
+    headers: Record<string, string>,
+    body?: any
+  ): Promise<PaginationTestResult> {
+    const result: PaginationTestResult = {
+      pattern,
+      tested: true,
+      passed: false,
+      confidence: 0,
+    };
+
+    try {
+      const page1Response = await this.fetchPage(
+        pattern,
+        baseUrl,
+        method,
+        headers,
+        body,
+        1
+      );
+      const page2Response = await this.fetchPage(
+        pattern,
+        baseUrl,
+        method,
+        headers,
+        body,
+        2
+      );
+      const page3Response = await this.fetchPage(
+        pattern,
+        baseUrl,
+        method,
+        headers,
+        body,
+        3
+      );
+
+      if (!page1Response.ok || !page2Response.ok || !page3Response.ok) {
+        result.error = "One or more page requests failed";
+        return result;
+      }
+
+      const page1Data = this.parseResponse(await page1Response.text());
+      const page2Data = this.parseResponse(await page2Response.text());
+      const page3Data = this.parseResponse(await page3Response.text());
+
+      // Validate cursor changes
+      const cursorValid = this.validateCursorChanges(
+        page1Data,
+        page2Data,
+        page3Data
+      );
+
+      // Check for duplicate items across pages
+      const duplicates = this.checkForDuplicates(
+        page1Data,
+        page2Data,
+        page3Data
+      );
+
+      result.passed = cursorValid && !duplicates.hasDuplicates;
+      result.confidence = cursorValid ? 0.9 : 0.3;
+      if (duplicates.hasDuplicates) {
+        result.error = `Duplicate items detected: ${duplicates.duplicateCount} duplicates`;
+        result.confidence = Math.max(0, result.confidence - 0.3);
+      }
+
+      return result;
+    } catch (error) {
+      result.error = error instanceof Error ? error.message : String(error);
+      return result;
+    }
+  }
+
+  /**
+   * Test offset pagination with edge cases (negative offsets, large offsets)
+   */
+  async testOffsetPaginationEdgeCases(
+    pattern: PaginationCandidate,
+    baseUrl: string,
+    method: string,
+    headers: Record<string, string>,
+    body?: any
+  ): Promise<PaginationTestResult> {
+    const result: PaginationTestResult = {
+      pattern,
+      tested: true,
+      passed: false,
+      confidence: 0,
+    };
+
+    try {
+      // Test normal offset
+      const normalResponse = await this.fetchPage(
+        pattern,
+        baseUrl,
+        method,
+        headers,
+        body,
+        0
+      );
+      if (!normalResponse.ok) {
+        result.error = "Normal offset request failed";
+        return result;
+      }
+
+      // Test large offset
+      const largeOffsetResponse = await this.fetchPage(
+        pattern,
+        baseUrl,
+        method,
+        headers,
+        body,
+        10000
+      );
+      const largeOffsetOk = largeOffsetResponse.ok;
+
+      // Test negative offset (should fail or return empty)
+      const negativeOffsetResponse = await this.fetchPage(
+        pattern,
+        baseUrl,
+        method,
+        headers,
+        body,
+        -1
+      );
+      const negativeOffsetOk = negativeOffsetResponse.ok;
+
+      // Offset pagination should handle large offsets gracefully (empty result is OK)
+      // Negative offsets should fail or return empty
+      result.passed =
+        normalResponse.ok &&
+        (largeOffsetOk || largeOffsetResponse.status === 400);
+      result.confidence = result.passed ? 0.8 : 0.4;
+
+      return result;
+    } catch (error) {
+      result.error = error instanceof Error ? error.message : String(error);
+      return result;
+    }
+  }
+
+  /**
+   * Test empty page handling
+   */
+  async testEmptyPageHandling(
+    pattern: PaginationCandidate,
+    baseUrl: string,
+    method: string,
+    headers: Record<string, string>,
+    body?: any
+  ): Promise<PaginationTestResult> {
+    const result: PaginationTestResult = {
+      pattern,
+      tested: true,
+      passed: false,
+      confidence: 0,
+    };
+
+    try {
+      // Try to fetch a very high page number (likely empty)
+      const highPageResponse = await this.fetchPage(
+        pattern,
+        baseUrl,
+        method,
+        headers,
+        body,
+        99999
+      );
+
+      if (!highPageResponse.ok && highPageResponse.status !== 404) {
+        result.error = `High page request failed with status ${highPageResponse.status}`;
+        return result;
+      }
+
+      const highPageData = this.parseResponse(await highPageResponse.text());
+      const itemCount = this.countItems(highPageData);
+
+      // Empty page should return empty array or empty object, not error
+      result.passed = highPageResponse.ok && itemCount === 0;
+      result.confidence = result.passed ? 0.7 : 0.3;
+
+      return result;
+    } catch (error) {
+      result.error = error instanceof Error ? error.message : String(error);
+      return result;
+    }
+  }
+
+  /**
+   * Test last page detection (no more data indicators)
+   */
+  async testLastPageDetection(
+    pattern: PaginationCandidate,
+    baseUrl: string,
+    method: string,
+    headers: Record<string, string>,
+    body?: any
+  ): Promise<PaginationTestResult> {
+    const result: PaginationTestResult = {
+      pattern,
+      tested: true,
+      passed: false,
+      confidence: 0,
+    };
+
+    try {
+      // Fetch multiple pages to find the last one
+      let currentPage = 1;
+      let hasMore = true;
+      let lastPageData: any = null;
+
+      while (hasMore && currentPage <= 10) {
+        // Limit to 10 pages for testing
+        const response = await this.fetchPage(
+          pattern,
+          baseUrl,
+          method,
+          headers,
+          body,
+          currentPage
+        );
+
+        if (!response.ok) {
+          break;
+        }
+
+        const data = this.parseResponse(await response.text());
+        const itemCount = this.countItems(data);
+
+        // Check for "hasMore" or "next" indicators
+        hasMore = this.detectHasMore(data, null) && itemCount > 0;
+
+        if (!hasMore || itemCount === 0) {
+          lastPageData = data;
+          break;
+        }
+
+        currentPage++;
+      }
+
+      // Last page should have no "hasMore" or empty items
+      if (lastPageData) {
+        const hasMoreIndicator = this.detectHasMore(lastPageData, null);
+        const itemCount = this.countItems(lastPageData);
+
+        result.passed = !hasMoreIndicator || itemCount === 0;
+        result.confidence = result.passed ? 0.8 : 0.4;
+      } else {
+        result.error = "Could not determine last page";
+      }
+
+      return result;
+    } catch (error) {
+      result.error = error instanceof Error ? error.message : String(error);
+      return result;
+    }
+  }
+
+  /**
+   * Check for duplicate items across pages
+   */
+  private checkForDuplicates(
+    page1: any,
+    page2: any,
+    page3: any
+  ): {
+    hasDuplicates: boolean;
+    duplicateCount: number;
+  } {
+    const items1 = this.extractItems(page1);
+    const items2 = this.extractItems(page2);
+    const items3 = this.extractItems(page3);
+
+    const allItems = [...items1, ...items2, ...items3];
+    const uniqueItems = new Set(allItems.map((item) => JSON.stringify(item)));
+
+    const duplicateCount = allItems.length - uniqueItems.size;
+
+    return {
+      hasDuplicates: duplicateCount > 0,
+      duplicateCount,
+    };
+  }
+
+  /**
+   * Extract items from response data
+   */
+  private extractItems(data: any): any[] {
+    if (Array.isArray(data)) {
+      return data;
+    }
+    if (data && typeof data === "object") {
+      const arrayFields = ["items", "data", "results", "list", "records"];
+      for (const field of arrayFields) {
+        if (Array.isArray(data[field])) {
+          return data[field];
+        }
+      }
+    }
+    return [];
   }
 
   /**

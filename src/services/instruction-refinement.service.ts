@@ -98,6 +98,13 @@ ${JSON.stringify(testResultsSummary, null, 2)}${htmlContext}
 CURRENT SELECTORS:
 ${JSON.stringify(selectorsOnly, null, 2)}
 
+IMPORTANT NOTES:
+- The system supports UNLIMITED RECURSIVE NESTED ARRAYS - if you see arrays within arrays, use nested extraction configs
+- For HTML: Use nested extraction configs with containerSelector for each array level
+- For JSON: Use nested extraction configs with jsonPath for each array level
+- The schema generation handles advanced JSON Schema features automatically (anyOf, allOf, oneOf, enum, constraints)
+- When fixing nested array extraction, ensure each level has its own containerSelector (HTML) or jsonPath (JSON)
+
 NOTE: You only need to modify the SELECTORS (extraction.selectors or jsonPath.fieldPaths). The schema is automatically generated from extracted data, so you don't need to provide it.
 
 ${
@@ -157,7 +164,9 @@ IMPORTANT:
     if (jsonMatch) {
       // Found markdown code block (shouldn't happen with JSON Mode, but handle it)
       jsonText = jsonMatch[1] || "";
-      console.warn("⚠️  Found markdown code block in response (unexpected with JSON Mode)");
+      console.warn(
+        "⚠️  Found markdown code block in response (unexpected with JSON Mode)"
+      );
     }
 
     // Parse the response
@@ -171,17 +180,81 @@ IMPORTANT:
         // Fix common structural issues: move pagination and headers out of extraction if nested incorrectly
         if (parsed.modification.extraction) {
           if (parsed.modification.extraction.pagination) {
-            console.warn("⚠️  Found pagination nested inside extraction, moving to root level");
-            parsed.modification.pagination = parsed.modification.extraction.pagination;
+            console.warn(
+              "⚠️  Found pagination nested inside extraction, moving to root level"
+            );
+            parsed.modification.pagination =
+              parsed.modification.extraction.pagination;
             delete parsed.modification.extraction.pagination;
           }
           if (parsed.modification.extraction.headers) {
-            console.warn("⚠️  Found headers nested inside extraction, moving to root level");
-            parsed.modification.headers = parsed.modification.extraction.headers;
+            console.warn(
+              "⚠️  Found headers nested inside extraction, moving to root level"
+            );
+            parsed.modification.headers =
+              parsed.modification.extraction.headers;
             delete parsed.modification.extraction.headers;
           }
         }
-        
+
+        // Validate nested extraction configs if present
+        const validateNestedConfig = (config: any, path: string = ""): void => {
+          if (config && typeof config === "object" && config.type === "array") {
+            if (!config.containerSelector && !config.jsonPath) {
+              console.warn(
+                `⚠️  Nested array config at ${path} missing containerSelector/jsonPath`
+              );
+            }
+            if (!config.selectors || typeof config.selectors !== "object") {
+              console.warn(
+                `⚠️  Nested array config at ${path} missing selectors`
+              );
+            } else {
+              // Recursively validate nested selectors
+              Object.entries(config.selectors).forEach(([key, value]) => {
+                if (
+                  value &&
+                  typeof value === "object" &&
+                  "type" in value &&
+                  (value as any).type === "array"
+                ) {
+                  validateNestedConfig(value as any, `${path}.${key}`);
+                }
+              });
+            }
+          }
+        };
+
+        // Validate nested structures in extraction
+        if (parsed.modification.extraction?.selectors) {
+          Object.entries(parsed.modification.extraction.selectors).forEach(
+            ([key, value]) => {
+              if (
+                value &&
+                typeof value === "object" &&
+                (value as any).type === "array"
+              ) {
+                validateNestedConfig(value, `extraction.selectors.${key}`);
+              }
+            }
+          );
+        }
+
+        // Validate nested structures in jsonPath
+        if (parsed.modification.jsonPath?.fieldPaths) {
+          Object.entries(parsed.modification.jsonPath.fieldPaths).forEach(
+            ([key, value]) => {
+              if (
+                value &&
+                typeof value === "object" &&
+                (value as any).type === "array"
+              ) {
+                validateNestedConfig(value, `jsonPath.fieldPaths.${key}`);
+              }
+            }
+          );
+        }
+
         // Validate the modified instructions
         try {
           validateScrapingInstructions(parsed.modification);
@@ -214,12 +287,22 @@ IMPORTANT:
       console.error(jsonText);
       if (jsonText.length > 0) {
         // Try to show where the error might be
-        const errorMessage = parseError instanceof Error ? parseError.message : String(parseError);
+        const errorMessage =
+          parseError instanceof Error ? parseError.message : String(parseError);
         console.error(`🔍 Parse error: ${errorMessage}`);
         // Show first and last 200 chars of JSON text for context
         if (jsonText.length > 400) {
-          console.error(`📋 JSON preview (first 200 chars): ${jsonText.substring(0, 200)}...`);
-          console.error(`📋 JSON preview (last 200 chars): ...${jsonText.substring(jsonText.length - 200)}`);
+          console.error(
+            `📋 JSON preview (first 200 chars): ${jsonText.substring(
+              0,
+              200
+            )}...`
+          );
+          console.error(
+            `📋 JSON preview (last 200 chars): ...${jsonText.substring(
+              jsonText.length - 200
+            )}`
+          );
         } else {
           console.error(`📋 Full JSON text: ${jsonText}`);
         }
@@ -267,6 +350,13 @@ export function initializeConversationHistory(): ConversationMessage[] {
     {
       role: "system",
       content: `You are an expert at analyzing and refining web scraping instructions. Your task is to review test results from executing scraping instructions and determine if they need to be modified.
+
+IMPORTANT CAPABILITIES:
+- The system supports UNLIMITED RECURSIVE NESTED ARRAYS - arrays within arrays within arrays at any depth
+- For nested arrays in HTML: Use nested extraction configs with containerSelector for each array level
+- For nested arrays in JSON: Use nested extraction configs with jsonPath for each array level
+- The schema generation automatically handles advanced JSON Schema features (anyOf, allOf, oneOf, enum, constraints, nullable types)
+- When fixing nested structures, ensure each array level has proper containerSelector (HTML) or jsonPath (JSON)
 
 When test results show:
 - Success: Data extracted correctly, pagination works (if configured) → Respond with {"ok": true}

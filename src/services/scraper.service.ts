@@ -332,63 +332,281 @@ async function makeRequest(
     );
   });
 
-  const fetchPromise = fetch(url, requestOptions);
+  // Retry logic with exponential backoff
+  const maxRetries = 3;
+  let lastError: Error | null = null;
 
-  const response = await Promise.race([fetchPromise, timeoutPromise]);
-
-  // If we get a 403, try using browser service as fallback
-  if (response.status === 403) {
-    console.log(
-      "⚠️  Got 403 Forbidden, attempting fallback to browser service..."
-    );
-    let browserService: BrowserService | null = null;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
-      browserService = new BrowserService();
-      await browserService.launchBrowser();
-      const { page } = await browserService.setupPageWithInterception();
+      const fetchPromise = fetch(url, {
+        ...requestOptions,
+        redirect: "follow", // Follow redirects automatically
+      });
 
-      // Navigate to the URL
-      await browserService.navigateToUrl(page, url);
+      const response = await Promise.race([fetchPromise, timeoutPromise]);
 
-      // Get cookies from the page (they may be set during navigation)
-      const cookies = await page.cookies();
-      const cookieString = cookies
-        .map((cookie) => `${cookie.name}=${cookie.value}`)
-        .join("; ");
+      // Handle rate limiting (429) with exponential backoff
+      if (response.status === 429) {
+        if (attempt < maxRetries - 1) {
+          const retryAfter = response.headers.get("Retry-After");
+          const waitTime = retryAfter
+            ? parseInt(retryAfter, 10) * 1000
+            : Math.pow(2, attempt) * 1000; // Exponential backoff: 1s, 2s, 4s
 
-      // Get the HTML content
-      const html = await page.content();
+          console.log(
+            `⚠️  Rate limited (429), waiting ${waitTime}ms before retry ${
+              attempt + 1
+            }/${maxRetries}...`
+          );
+          await new Promise((resolve) => setTimeout(resolve, waitTime));
+          continue;
+        } else {
+          throw new Error(
+            `Rate limited (429) after ${maxRetries} attempts. Retry-After: ${
+              response.headers.get("Retry-After") || "N/A"
+            }`
+          );
+        }
+      }
 
-      // Log cookie info for debugging
-      if (cookieString) {
+      // If we get a 403, try using browser service as fallback
+      if (response.status === 403) {
         console.log(
-          `   ℹ️  Captured ${cookies.length} cookie(s) from browser session`
+          "⚠️  Got 403 Forbidden, attempting fallback to browser service..."
+        );
+        let browserService: BrowserService | null = null;
+        try {
+          browserService = new BrowserService();
+          await browserService.launchBrowser();
+          const { page } = await browserService.setupPageWithInterception();
+
+          // Navigate to the URL
+          await browserService.navigateToUrl(page, url);
+
+          // Get cookies from the page (they may be set during navigation)
+          const cookies = await page.cookies();
+          const cookieString = cookies
+            .map((cookie) => `${cookie.name}=${cookie.value}`)
+            .join("; ");
+
+          // Get the HTML content
+          const html = await page.content();
+
+          // Log cookie info for debugging
+          if (cookieString) {
+            console.log(
+              `   ℹ️  Captured ${cookies.length} cookie(s) from browser session`
+            );
+          }
+
+          await browserService.closeBrowser();
+          console.log(
+            "✅ Successfully retrieved content using browser service"
+          );
+
+          // Note: Cookies are captured but not automatically saved to instructions
+          // The browser service fallback is a one-time workaround for 403 errors
+          return html;
+        } catch (browserError) {
+          console.error(
+            "❌ Browser service fallback also failed:",
+            browserError
+          );
+          if (browserService) {
+            await browserService.closeBrowser().catch(() => {});
+          }
+          throw new Error(
+            `HTTP ${response.status}: ${response.statusText} - ${url}`
+          );
+        }
+      }
+
+      // Handle other error status codes
+      if (!response.ok) {
+        // Retry on 5xx errors (server errors)
+        if (
+          response.status >= 500 &&
+          response.status < 600 &&
+          attempt < maxRetries - 1
+        ) {
+          const waitTime = Math.pow(2, attempt) * 1000;
+          console.log(
+            `⚠️  Server error (${
+              response.status
+            }), waiting ${waitTime}ms before retry ${
+              attempt + 1
+            }/${maxRetries}...`
+          );
+          await new Promise((resolve) => setTimeout(resolve, waitTime));
+          continue;
+        }
+
+        // Don't retry on 4xx errors (client errors)
+        throw new Error(
+          `HTTP ${response.status}: ${response.statusText} - ${url}`
         );
       }
 
-      await browserService.closeBrowser();
-      console.log("✅ Successfully retrieved content using browser service");
+      // Success - return response body
+      const responseBody = await response.text();
 
-      // Note: Cookies are captured but not automatically saved to instructions
-      // The browser service fallback is a one-time workaround for 403 errors
-      return html;
-    } catch (browserError) {
-      console.error("❌ Browser service fallback also failed:", browserError);
-      if (browserService) {
-        await browserService.closeBrowser().catch(() => {});
+      // Handle empty responses gracefully
+      if (responseBody.length === 0) {
+        console.warn("⚠️  Received empty response body");
       }
-      throw new Error(
-        `HTTP ${response.status}: ${response.statusText} - ${url}`
-      );
+
+      return responseBody;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+
+      // Don't retry on timeout or network errors for last attempt
+      if (attempt === maxRetries - 1) {
+        throw lastError;
+      }
+
+      // Retry on network errors with exponential backoff
+      if (error instanceof TypeError || error instanceof Error) {
+        const waitTime = Math.pow(2, attempt) * 1000;
+        console.log(
+          `⚠️  Request failed (${
+            error.message
+          }), waiting ${waitTime}ms before retry ${
+            attempt + 1
+          }/${maxRetries}...`
+        );
+        await new Promise((resolve) => setTimeout(resolve, waitTime));
+        continue;
+      }
+
+      throw error;
     }
   }
 
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: ${response.statusText} - ${url}`);
+  // Should not reach here, but just in case
+  throw lastError || new Error("Request failed after all retries");
+}
+
+/**
+ * Recursively extract field value from JSON data using JSONPath or nested extraction config
+ * Supports unlimited recursive nested arrays
+ */
+function extractJSONField(
+  data: any,
+  fieldPath:
+    | string
+    | {
+        type: string;
+        jsonPath?: string;
+        containerSelector?: string;
+        selectors: Record<string, any>;
+      },
+  depth: number = 0
+): any {
+  // Safety limit to prevent infinite recursion
+  const MAX_DEPTH = 100;
+  if (depth > MAX_DEPTH) {
+    console.warn(
+      `Maximum JSON extraction depth (${MAX_DEPTH}) reached, returning null`
+    );
+    return null;
   }
 
-  const responseBody = await response.text();
-  return responseBody;
+  // Handle nested extraction config (unlimited recursive depth)
+  if (
+    typeof fieldPath === "object" &&
+    fieldPath !== null &&
+    "type" in fieldPath &&
+    fieldPath.type === "array" &&
+    ("jsonPath" in fieldPath || "containerSelector" in fieldPath) &&
+    "selectors" in fieldPath
+  ) {
+    const nestedConfig = fieldPath as {
+      type: string;
+      jsonPath?: string;
+      containerSelector?: string;
+      selectors: Record<string, any>;
+    };
+
+    // Use JSONPath to find the array
+    if (nestedConfig.jsonPath) {
+      try {
+        const arrayResults = JSONPath({
+          path: nestedConfig.jsonPath,
+          json: data,
+        });
+        if (Array.isArray(arrayResults) && arrayResults.length > 0) {
+          const arrayData = Array.isArray(arrayResults[0])
+            ? arrayResults[0]
+            : arrayResults;
+
+          // Recursively extract from each item in the array
+          return arrayData.map((item: any) => {
+            const nestedItem: Record<string, any> = {};
+            Object.entries(nestedConfig.selectors).forEach(
+              ([nestedFieldName, nestedFieldPath]) => {
+                try {
+                  nestedItem[nestedFieldName] = extractJSONField(
+                    item,
+                    nestedFieldPath,
+                    depth + 1
+                  );
+                } catch (error) {
+                  console.warn(
+                    `Error extracting nested JSON field "${nestedFieldName}" at depth ${depth}:`,
+                    error
+                  );
+                  nestedItem[nestedFieldName] = null;
+                }
+              }
+            );
+            return nestedItem;
+          });
+        }
+      } catch (error) {
+        console.warn(
+          `Error processing nested JSONPath "${nestedConfig.jsonPath}":`,
+          error
+        );
+        return [];
+      }
+    }
+    return [];
+  }
+
+  // Handle simple JSONPath string
+  if (typeof fieldPath === "string") {
+    try {
+      // Normalize and validate JSONPath
+      const normalizedPath = normalizeJSONPath(fieldPath);
+      if (!normalizedPath) {
+        console.warn(`Invalid JSONPath: "${fieldPath}"`);
+        return null;
+      }
+
+      const pathResults = JSONPath({ path: normalizedPath, json: data });
+      if (pathResults.length > 0) {
+        return pathResults[0];
+      }
+    } catch (error) {
+      console.warn(`Error processing JSONPath "${fieldPath}":`, error);
+      // Try to recover by checking if it's a simple property access
+      if (fieldPath.startsWith("$.") && data && typeof data === "object") {
+        const simplePath = fieldPath.replace(/^\$\./, "");
+        try {
+          const value = simplePath
+            .split(".")
+            .reduce((obj: any, key: string) => obj?.[key], data);
+          if (value !== undefined) {
+            return value;
+          }
+        } catch {
+          // Ignore recovery attempt errors
+        }
+      }
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -398,7 +616,53 @@ function extractFromJSON(
   body: string,
   instructions: ScrapingInstructions
 ): any {
-  const json = JSON.parse(body);
+  // Handle empty or malformed JSON gracefully
+  if (!body || body.trim().length === 0) {
+    throw new Error("Empty response body received");
+  }
+
+  let json: any;
+  try {
+    json = JSON.parse(body);
+  } catch (error) {
+    // Try to recover from common JSON issues
+    const trimmed = body.trim();
+
+    // Try to fix common issues
+    let fixedBody = trimmed;
+
+    // Remove BOM if present
+    if (fixedBody.charCodeAt(0) === 0xfeff) {
+      fixedBody = fixedBody.slice(1);
+    }
+
+    // Try to parse again
+    try {
+      json = JSON.parse(fixedBody);
+    } catch (secondError) {
+      // Try to extract JSON from HTML comments or script tags
+      const jsonMatch = fixedBody.match(/<script[^>]*>([\s\S]*?)<\/script>/i);
+      if (jsonMatch && jsonMatch[1]) {
+        try {
+          json = JSON.parse(jsonMatch[1]);
+        } catch {
+          // Last resort: throw original error
+          throw new Error(
+            `Failed to parse JSON response: ${
+              error instanceof Error ? error.message : String(error)
+            }. ` + `Response preview: ${trimmed.substring(0, 200)}...`
+          );
+        }
+      } else {
+        throw new Error(
+          `Failed to parse JSON response: ${
+            error instanceof Error ? error.message : String(error)
+          }. ` + `Response preview: ${trimmed.substring(0, 200)}...`
+        );
+      }
+    }
+  }
+
   const { jsonPath } = instructions;
 
   if (!jsonPath) {
@@ -408,9 +672,13 @@ function extractFromJSON(
   // Get root data
   let rootData = json;
   if (jsonPath.rootPath) {
-    const rootResults = JSONPath({ path: jsonPath.rootPath, json });
-    if (rootResults.length > 0) {
-      rootData = rootResults[0];
+    try {
+      const rootResults = JSONPath({ path: jsonPath.rootPath, json });
+      if (rootResults.length > 0) {
+        rootData = rootResults[0];
+      }
+    } catch (error) {
+      console.warn(`Error processing rootPath "${jsonPath.rootPath}":`, error);
     }
   }
 
@@ -434,22 +702,32 @@ function extractFromJSON(
 
       const results = rootData.map((item) => {
         const itemResult: Record<string, any> = {};
-        Object.entries(jsonPath.fieldPaths).forEach(([fieldName, path]) => {
-          const pathResults = JSONPath({ path, json: item });
-          const stats = debugInfo.fieldExtractionStats![fieldName];
-          if (pathResults.length > 0) {
-            itemResult[fieldName] = pathResults[0];
-            if (stats) {
-              stats.success++;
-            }
-          } else {
-            itemResult[fieldName] = null;
-            if (stats) {
-              stats.failed++;
-              stats.nullCount++;
+        Object.entries(jsonPath.fieldPaths).forEach(
+          ([fieldName, fieldPath]) => {
+            try {
+              const value = extractJSONField(item, fieldPath, 0);
+              itemResult[fieldName] = value;
+
+              const stats = debugInfo.fieldExtractionStats![fieldName];
+              if (stats) {
+                if (value === null || value === undefined) {
+                  stats.failed++;
+                  stats.nullCount++;
+                } else {
+                  stats.success++;
+                }
+              }
+            } catch (error) {
+              console.warn(`Error extracting field "${fieldName}":`, error);
+              itemResult[fieldName] = null;
+              const errorStats = debugInfo.fieldExtractionStats![fieldName];
+              if (errorStats) {
+                errorStats.failed++;
+                errorStats.nullCount++;
+              }
             }
           }
-        });
+        );
         return itemResult;
       });
 
@@ -504,22 +782,32 @@ function extractFromJSON(
 
           const results = arrayData.map((item: any) => {
             const itemResult: Record<string, any> = {};
-            Object.entries(jsonPath.fieldPaths).forEach(([fieldName, path]) => {
-              const pathResults = JSONPath({ path, json: item });
-              const stats = debugInfo.fieldExtractionStats![fieldName];
-              if (pathResults.length > 0) {
-                itemResult[fieldName] = pathResults[0];
-                if (stats) {
-                  stats.success++;
-                }
-              } else {
-                itemResult[fieldName] = null;
-                if (stats) {
-                  stats.failed++;
-                  stats.nullCount++;
+            Object.entries(jsonPath.fieldPaths).forEach(
+              ([fieldName, fieldPath]) => {
+                try {
+                  const value = extractJSONField(item, fieldPath, 0);
+                  itemResult[fieldName] = value;
+
+                  const stats = debugInfo.fieldExtractionStats![fieldName];
+                  if (stats) {
+                    if (value === null || value === undefined) {
+                      stats.failed++;
+                      stats.nullCount++;
+                    } else {
+                      stats.success++;
+                    }
+                  }
+                } catch (error) {
+                  console.warn(`Error extracting field "${fieldName}":`, error);
+                  itemResult[fieldName] = null;
+                  const errorStats = debugInfo.fieldExtractionStats![fieldName];
+                  if (errorStats) {
+                    errorStats.failed++;
+                    errorStats.nullCount++;
+                  }
                 }
               }
-            });
+            );
             return itemResult;
           });
 
@@ -544,11 +832,14 @@ function extractFromJSON(
 
   // Single object extraction
   const result: Record<string, any> = {};
-  Object.entries(jsonPath.fieldPaths).forEach(([fieldName, path]) => {
-    const results = JSONPath({ path, json: rootData });
-    if (results.length > 0) {
-      result[fieldName] = results[0];
-    } else {
+  Object.entries(jsonPath.fieldPaths).forEach(([fieldName, fieldPath]) => {
+    try {
+      result[fieldName] = extractJSONField(rootData, fieldPath, 0);
+      if (result[fieldName] === null || result[fieldName] === undefined) {
+        result[fieldName] = null;
+      }
+    } catch (error) {
+      console.warn(`Error extracting field "${fieldName}":`, error);
       result[fieldName] = null;
     }
   });
@@ -559,16 +850,65 @@ function extractFromJSON(
 /**
  * Strip pseudo-elements from a selector string
  * Removes ::text, ::attr(...), ::html, etc. from anywhere in the selector
+ * Enhanced to handle more edge cases
  */
 function stripPseudoElements(selector: string): string {
-  if (!selector) return selector;
+  if (!selector || typeof selector !== "string") return selector || "";
 
   // Remove ::text, ::html (at end or anywhere)
   selector = selector.replace(/::text\b/g, "");
   selector = selector.replace(/::html\b/g, "");
   // Remove ::attr(...) - matches ::attr(anything)
   selector = selector.replace(/::attr\([^)]*\)/g, "");
+  // Remove other pseudo-elements that might interfere
+  selector = selector.replace(/::before\b/g, "");
+  selector = selector.replace(/::after\b/g, "");
+  selector = selector.replace(/::first-child\b/g, "");
+  selector = selector.replace(/::last-child\b/g, "");
+  selector = selector.replace(/::nth-child\([^)]*\)/g, "");
+
   return selector.trim();
+}
+
+/**
+ * Validate and normalize CSS selector
+ */
+function normalizeCSSSelector(selector: string): string {
+  if (!selector || typeof selector !== "string") return "";
+
+  // Remove leading/trailing whitespace
+  selector = selector.trim();
+
+  // Handle empty selectors
+  if (selector.length === 0) return "";
+
+  // Handle invalid characters (basic validation)
+  // CSS selectors should not contain certain characters
+  if (selector.includes("\n") || selector.includes("\r")) {
+    selector = selector.replace(/[\n\r]/g, " ");
+  }
+
+  return selector;
+}
+
+/**
+ * Validate and normalize JSONPath expression
+ */
+function normalizeJSONPath(path: string): string {
+  if (!path || typeof path !== "string") return "";
+
+  // Remove leading/trailing whitespace
+  path = path.trim();
+
+  // Ensure it starts with $ if it's a JSONPath
+  if (path.length > 0 && !path.startsWith("$") && !path.startsWith("@")) {
+    // Might be a relative path, try to make it absolute
+    if (path.startsWith(".") || path.startsWith("[")) {
+      path = "$" + path;
+    }
+  }
+
+  return path;
 }
 
 /**
@@ -589,132 +929,204 @@ function extractFromHTML(
     selector: string | { selector: string; type?: string; attribute?: string }
   ): { selector: string; type: string; attribute?: string } => {
     if (typeof selector === "string") {
+      // Handle empty or invalid selectors
+      if (!selector || selector.trim().length === 0) {
+        return { selector: "", type: "text" };
+      }
+
       // Parse format: "selector::text" or "selector::attr(name)" or "selector::html"
       const textMatch = selector.match(/^(.+)::text$/);
       const attrMatch = selector.match(/^(.+)::attr\(([^)]+)\)$/);
       const htmlMatch = selector.match(/^(.+)::html$/);
 
       if (textMatch && textMatch[1]) {
-        return { selector: stripPseudoElements(textMatch[1]), type: "text" };
+        const cleanSelector = normalizeCSSSelector(
+          stripPseudoElements(textMatch[1])
+        );
+        return { selector: cleanSelector, type: "text" };
       } else if (attrMatch && attrMatch[1] && attrMatch[2]) {
+        const cleanSelector = normalizeCSSSelector(
+          stripPseudoElements(attrMatch[1])
+        );
         return {
-          selector: stripPseudoElements(attrMatch[1]),
+          selector: cleanSelector,
           type: "attr",
-          attribute: attrMatch[2],
+          attribute: attrMatch[2].trim(),
         };
       } else if (htmlMatch && htmlMatch[1]) {
-        return { selector: stripPseudoElements(htmlMatch[1]), type: "html" };
+        const cleanSelector = normalizeCSSSelector(
+          stripPseudoElements(htmlMatch[1])
+        );
+        return { selector: cleanSelector, type: "html" };
       }
-      return { selector: stripPseudoElements(selector), type: "text" };
+
+      // Default to text extraction
+      const cleanSelector = normalizeCSSSelector(stripPseudoElements(selector));
+      return { selector: cleanSelector, type: "text" };
     }
+
+    // Handle object selector
+    if (!selector || !selector.selector) {
+      return { selector: "", type: "text" };
+    }
+
+    const cleanSelector = normalizeCSSSelector(
+      stripPseudoElements(selector.selector)
+    );
     return {
-      selector: stripPseudoElements(selector.selector),
+      selector: cleanSelector,
       type: selector.type || "text",
       attribute: selector.attribute,
     };
   };
 
+  /**
+   * Recursively extract field value from element
+   * Supports unlimited recursive nested arrays (array -> array -> array -> ...)
+   */
   const extractField = (
     element: cheerio.Cheerio<any>,
-    fieldSelector: any
+    fieldSelector: any,
+    depth: number = 0
   ): any => {
-    // Handle nested array extraction
+    // Safety limit to prevent infinite recursion (should not be needed in practice)
+    const MAX_DEPTH = 100;
+    if (depth > MAX_DEPTH) {
+      console.warn(
+        `Maximum extraction depth (${MAX_DEPTH}) reached, returning null`
+      );
+      return null;
+    }
+
+    // Handle nested array extraction (unlimited recursive depth)
     if (
       typeof fieldSelector === "object" &&
+      fieldSelector !== null &&
       "type" in fieldSelector &&
       fieldSelector.type === "array" &&
-      "containerSelector" in fieldSelector &&
+      ("containerSelector" in fieldSelector || "jsonPath" in fieldSelector) &&
       "selectors" in fieldSelector
     ) {
       const nestedExtraction = fieldSelector as {
         type: string;
-        containerSelector: string;
+        containerSelector?: string;
+        jsonPath?: string;
         selectors: Record<string, any>;
       };
-      const cleanContainerSelector = stripPseudoElements(
-        nestedExtraction.containerSelector
-      );
-      const containers = element.find(cleanContainerSelector);
-      const nestedResults: any[] = [];
 
-      containers.each((_, nestedElement) => {
-        const $nestedElement = $(nestedElement);
-        const nestedItem: Record<string, any> = {};
-
-        Object.entries(nestedExtraction.selectors).forEach(
-          ([nestedFieldName, nestedFieldSelector]) => {
-            // Handle relative selectors (starting with ::)
-            if (
-              typeof nestedFieldSelector === "string" &&
-              nestedFieldSelector.startsWith("::")
-            ) {
-              // Relative selector - apply to current element
-              const relativeSelector = nestedFieldSelector.substring(2);
-              if (relativeSelector.startsWith("attr(")) {
-                const attrMatch = relativeSelector.match(/^attr\(([^)]+)\)$/);
-                if (attrMatch && attrMatch[1]) {
-                  nestedItem[nestedFieldName] =
-                    $nestedElement.attr(attrMatch[1]) || null;
-                }
-              } else if (relativeSelector === "text") {
-                nestedItem[nestedFieldName] = $nestedElement.text().trim();
-              } else if (relativeSelector === "html") {
-                nestedItem[nestedFieldName] = $nestedElement.html() || null;
-              } else {
-                // Unknown relative selector
-                nestedItem[nestedFieldName] = null;
-              }
-            } else if (
-              typeof nestedFieldSelector === "string" &&
-              nestedFieldSelector.includes("ancestor::")
-            ) {
-              // XPath ancestor selector - cheerio doesn't support XPath
-              // Try to find the ancestor using CSS selectors
-              console.warn(
-                `XPath selector "${nestedFieldSelector}" is not fully supported. Attempting CSS alternative.`
-              );
-              // Extract the attribute name if present
-              const attrMatch = nestedFieldSelector.match(/::attr\(([^)]+)\)$/);
-              if (attrMatch && attrMatch[1]) {
-                // Try to find a button ancestor
-                const button = $nestedElement.closest("button");
-                if (button.length > 0) {
-                  nestedItem[nestedFieldName] =
-                    button.attr(attrMatch[1]) || null;
-                } else {
-                  nestedItem[nestedFieldName] = null;
-                }
-              } else {
-                nestedItem[nestedFieldName] = null;
-              }
-            } else {
-              // Regular selector - extract from nested element
-              nestedItem[nestedFieldName] = extractField(
-                $nestedElement,
-                nestedFieldSelector
-              );
-            }
-          }
+      // For HTML extraction, use containerSelector
+      if (nestedExtraction.containerSelector) {
+        const cleanContainerSelector = stripPseudoElements(
+          nestedExtraction.containerSelector
         );
+        const containers = element.find(cleanContainerSelector);
+        const nestedResults: any[] = [];
 
-        nestedResults.push(nestedItem);
-      });
+        containers.each((_, nestedElement) => {
+          const $nestedElement = $(nestedElement);
+          const nestedItem: Record<string, any> = {};
 
-      return nestedResults;
+          Object.entries(nestedExtraction.selectors).forEach(
+            ([nestedFieldName, nestedFieldSelector]) => {
+              try {
+                // Recursively extract - this handles unlimited nesting
+                nestedItem[nestedFieldName] = extractField(
+                  $nestedElement,
+                  nestedFieldSelector,
+                  depth + 1
+                );
+              } catch (error) {
+                console.warn(
+                  `Error extracting nested field "${nestedFieldName}" at depth ${depth}:`,
+                  error
+                );
+                nestedItem[nestedFieldName] = null;
+              }
+            }
+          );
+
+          nestedResults.push(nestedItem);
+        });
+
+        return nestedResults;
+      }
     }
 
-    // Handle simple selectors
+    // Handle relative selectors (starting with ::)
+    if (typeof fieldSelector === "string" && fieldSelector.startsWith("::")) {
+      const relativeSelector = fieldSelector.substring(2);
+      if (relativeSelector.startsWith("attr(")) {
+        const attrMatch = relativeSelector.match(/^attr\(([^)]+)\)$/);
+        if (attrMatch && attrMatch[1]) {
+          return element.attr(attrMatch[1]) || null;
+        }
+      } else if (relativeSelector === "text") {
+        return element.text().trim();
+      } else if (relativeSelector === "html") {
+        return element.html() || null;
+      } else {
+        // Unknown relative selector
+        return null;
+      }
+    }
+
+    // Handle XPath ancestor selectors
+    if (
+      typeof fieldSelector === "string" &&
+      fieldSelector.includes("ancestor::")
+    ) {
+      // XPath ancestor selector - cheerio doesn't support XPath
+      // Try to find the ancestor using CSS selectors
+      console.warn(
+        `XPath selector "${fieldSelector}" is not fully supported. Attempting CSS alternative.`
+      );
+      const attrMatch = fieldSelector.match(/::attr\(([^)]+)\)$/);
+      if (attrMatch && attrMatch[1]) {
+        // Try to find a button ancestor
+        const button = element.closest("button");
+        if (button.length > 0) {
+          return button.attr(attrMatch[1]) || null;
+        }
+      }
+      return null;
+    }
+
+    // Handle simple selectors (CSS/XPath)
     const parsed = parseSelector(fieldSelector);
-    const selected = element.find(parsed.selector).first();
 
-    if (parsed.type === "text") {
-      return selected.text().trim();
-    } else if (parsed.type === "attr" && parsed.attribute) {
-      return selected.attr(parsed.attribute) || null;
-    } else if (parsed.type === "html") {
-      return selected.html() || null;
+    // Handle empty selectors gracefully
+    if (!parsed.selector || parsed.selector.length === 0) {
+      console.warn("Empty selector encountered, returning null");
+      return null;
     }
-    return selected.text().trim();
+
+    try {
+      const selected = element.find(parsed.selector).first();
+
+      if (selected.length === 0) {
+        // Selector didn't match anything
+        return null;
+      }
+
+      if (parsed.type === "text") {
+        const text = selected.text();
+        return text ? text.trim() : null;
+      } else if (parsed.type === "attr" && parsed.attribute) {
+        return selected.attr(parsed.attribute) || null;
+      } else if (parsed.type === "html") {
+        return selected.html() || null;
+      }
+
+      // Default to text
+      const text = selected.text();
+      return text ? text.trim() : null;
+    } catch (error) {
+      console.warn(
+        `Error extracting with selector "${parsed.selector}":`,
+        error
+      );
+      return null;
+    }
   };
 
   if (instructions.outputType === "array") {
@@ -768,6 +1180,17 @@ function extractFromHTML(
               Object.entries(extraction.selectors).forEach(
                 ([fieldName, fieldSelector]) => {
                   try {
+                    // Skip nested extraction configs (they're handled separately)
+                    if (
+                      fieldSelector &&
+                      typeof fieldSelector === "object" &&
+                      "type" in fieldSelector &&
+                      fieldSelector.type === "array"
+                    ) {
+                      // Nested array extraction - skip for data-items extraction
+                      return;
+                    }
+
                     // For data-items, we need to map CSS selectors to JSON properties
                     // Strategy: Try fieldName first, then extract property from selector
                     const parsed = parseSelector(fieldSelector);
@@ -834,11 +1257,31 @@ function extractFromHTML(
     };
 
     // Count selector matches
+    // Helper function to count selector matches (handles nested structures)
+    const countSelectorMatches = (
+      selector: any,
+      container: cheerio.Cheerio<any>
+    ): number => {
+      if (
+        typeof selector === "object" &&
+        selector !== null &&
+        "type" in selector &&
+        selector.type === "array" &&
+        "containerSelector" in selector
+      ) {
+        const cleanSelector = stripPseudoElements(selector.containerSelector);
+        return container.find(cleanSelector).length;
+      } else if (typeof selector === "string") {
+        const parsed = parseSelector(selector);
+        return container.find(parsed.selector).length;
+      }
+      return 0;
+    };
+
     Object.entries(extraction.selectors).forEach(
       ([fieldName, fieldSelector]) => {
         try {
-          const parsed = parseSelector(fieldSelector);
-          const matches = containers.find(parsed.selector).length;
+          const matches = countSelectorMatches(fieldSelector, containers);
           debugInfo.selectorMatches![fieldName] = matches;
         } catch (error) {
           debugInfo.selectorMatches![fieldName] = 0;
@@ -900,6 +1343,17 @@ function extractFromHTML(
     const result: Record<string, any> = {};
     Object.entries(extraction.selectors).forEach(
       ([fieldName, fieldSelector]) => {
+        // Skip nested extraction configs (they're handled separately)
+        if (
+          fieldSelector &&
+          typeof fieldSelector === "object" &&
+          "type" in fieldSelector &&
+          fieldSelector.type === "array"
+        ) {
+          // Nested array extraction - skip for single object extraction
+          return;
+        }
+
         const parsed = parseSelector(fieldSelector);
         const selected = $(parsed.selector).first();
 

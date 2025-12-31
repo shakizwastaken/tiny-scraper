@@ -92,7 +92,9 @@ export async function scrapeHandler(
     await browserService.navigateToUrl(page, validUrl);
 
     // Scroll to bottom to trigger lazy-loaded content and pagination requests
-    console.log("\n[5.5/6] Scrolling to bottom to trigger lazy-loaded content...");
+    console.log(
+      "\n[5.5/6] Scrolling to bottom to trigger lazy-loaded content..."
+    );
     await browserService.scrollToBottom(page);
     console.log("✅ Scrolling complete");
 
@@ -110,12 +112,12 @@ export async function scrapeHandler(
     function decodeHtmlEntities(text: string): string {
       return text
         .replace(/&quot;/g, '"')
-        .replace(/&amp;/g, '&')
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>')
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
         .replace(/&#39;/g, "'")
         .replace(/&#x27;/g, "'")
-        .replace(/&#x2F;/g, '/');
+        .replace(/&#x2F;/g, "/");
     }
 
     const matchingRequests: InterceptedRequest[] = [];

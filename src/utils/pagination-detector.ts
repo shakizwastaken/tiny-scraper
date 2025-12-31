@@ -5,8 +5,23 @@ export interface PaginationHints {
   bodyParams?: Record<string, any>;
   urlPattern?: string;
   hasPaginationControls?: boolean;
-  detectedPattern?: "page" | "offset" | "cursor" | "none";
+  detectedPattern?:
+    | "page"
+    | "offset"
+    | "cursor"
+    | "scroll"
+    | "time"
+    | "token"
+    | "graphql"
+    | "hybrid"
+    | "none";
   examples?: string[];
+  // Additional detection hints
+  infiniteScroll?: boolean;
+  graphQLCursor?: boolean;
+  timeBased?: boolean;
+  tokenBased?: boolean;
+  hybridPagination?: boolean;
 }
 
 /**
@@ -38,12 +53,39 @@ export function detectPaginationFromUrl(url: string): PaginationHints {
       "before",
       "next",
       "nextToken",
+      // GraphQL pagination
+      "first",
+      "last",
+      "after",
+      "before",
+      // Time-based pagination
+      "since",
+      "until",
+      "from",
+      "to",
+      "startTime",
+      "endTime",
+      "timestamp",
+      "createdAfter",
+      "createdBefore",
+      // Token-based pagination
+      "token",
+      "accessToken",
+      "pageToken",
+      "continuationToken",
+      // Hybrid pagination
+      "pageSize",
+      "pageToken",
     ];
 
     // Create regex patterns for exact/word-boundary matching
     const pagePattern = /\b(page|p|pageNum|pageNumber)\b/i;
     const offsetPattern = /\b(offset|skip|start|startIndex)\b/i;
     const cursorPattern = /\b(cursor|after|before|next|nextToken)\b/i;
+    const graphQLPattern = /\b(first|last|after|before)\b/i;
+    const timePattern =
+      /\b(since|until|from|to|startTime|endTime|timestamp|createdAfter|createdBefore)\b/i;
+    const tokenPattern = /\b(token|accessToken|pageToken|continuationToken)\b/i;
 
     urlObj.searchParams.forEach((value, key) => {
       const keyLower = key.toLowerCase();
@@ -60,13 +102,52 @@ export function detectPaginationFromUrl(url: string): PaginationHints {
       if (isPaginationParam) {
         queryParams[key] = value;
 
-        // Determine pattern type (prioritize page, then offset, then cursor)
+        // Determine pattern type (prioritize page, then offset, then cursor, then others)
         if (!hints.detectedPattern && pagePattern.test(keyLower)) {
           hints.detectedPattern = "page";
         } else if (!hints.detectedPattern && offsetPattern.test(keyLower)) {
           hints.detectedPattern = "offset";
+        } else if (!hints.detectedPattern && graphQLPattern.test(keyLower)) {
+          hints.detectedPattern = "graphql";
+          hints.graphQLCursor = true;
+        } else if (!hints.detectedPattern && timePattern.test(keyLower)) {
+          hints.detectedPattern = "time";
+          hints.timeBased = true;
+        } else if (!hints.detectedPattern && tokenPattern.test(keyLower)) {
+          hints.detectedPattern = "token";
+          hints.tokenBased = true;
         } else if (!hints.detectedPattern && cursorPattern.test(keyLower)) {
           hints.detectedPattern = "cursor";
+        }
+
+        // Check for hybrid pagination (e.g., page + pageSize, page + cursor)
+        if (
+          hints.detectedPattern &&
+          (keyLower.includes("page") ||
+            keyLower.includes("cursor") ||
+            keyLower.includes("token"))
+        ) {
+          const hasPage =
+            queryParams.hasOwnProperty("page") ||
+            queryParams.hasOwnProperty("p");
+          const hasCursor =
+            queryParams.hasOwnProperty("cursor") ||
+            queryParams.hasOwnProperty("after");
+          const hasToken =
+            queryParams.hasOwnProperty("token") ||
+            queryParams.hasOwnProperty("pageToken");
+          const hasSize =
+            queryParams.hasOwnProperty("pageSize") ||
+            queryParams.hasOwnProperty("size");
+
+          if (
+            (hasPage && hasCursor) ||
+            (hasPage && hasToken) ||
+            (hasCursor && hasSize)
+          ) {
+            hints.detectedPattern = "hybrid";
+            hints.hybridPagination = true;
+          }
         }
       }
     });
@@ -104,17 +185,64 @@ export function detectPaginationFromHTML(html: string): PaginationHints {
     /data-type[=\s]*["']?ajax["']?/gi,
     /data-items[=\s]*["']/gi,
     /class[=\s]*["'][^"']*\bajax[^"']*["']/gi,
+    // Infinite scroll patterns
+    /intersection[_-]?observer/gi,
+    /scroll[_-]?pagination/gi,
+    /infinite[_-]?scroll/gi,
+    /lazy[_-]?load/gi,
+    /on[_-]?scroll[=:]/gi,
+    /addEventListener\s*\(\s*["']scroll["']/gi,
+    // GraphQL patterns
+    /graphql/gi,
+    /query\s*\{[^}]*first[^}]*after/gi,
+    // Time-based patterns
+    /timestamp[=\s]*["']?(\d+)/gi,
+    /created[_-]?after/gi,
+    /created[_-]?before/gi,
+    /since[=\s]*["']?(\d+)/gi,
+    /until[=\s]*["']?(\d+)/gi,
   ];
 
   let hasControls = false;
+  let hasInfiniteScroll = false;
+  let hasGraphQL = false;
+  let hasTimeBased = false;
+
   // Reset regex lastIndex to avoid state issues
   for (const pattern of paginationPatterns) {
     pattern.lastIndex = 0; // Reset regex state
     if (pattern.test(html)) {
       hasControls = true;
-      break;
+
+      // Check for specific patterns
+      if (
+        pattern.source.includes("scroll") ||
+        pattern.source.includes("intersection") ||
+        pattern.source.includes("lazy")
+      ) {
+        hasInfiniteScroll = true;
+      }
+      if (
+        pattern.source.includes("graphql") ||
+        pattern.source.includes("first") ||
+        pattern.source.includes("after")
+      ) {
+        hasGraphQL = true;
+      }
+      if (
+        pattern.source.includes("timestamp") ||
+        pattern.source.includes("since") ||
+        pattern.source.includes("until") ||
+        pattern.source.includes("created")
+      ) {
+        hasTimeBased = true;
+      }
     }
   }
+
+  hints.infiniteScroll = hasInfiniteScroll;
+  hints.graphQLCursor = hasGraphQL;
+  hints.timeBased = hasTimeBased;
 
   // Check for data-items attribute with JSON data (AJAX pagination indicator)
   const dataItemsPattern = /data-items[=\s]*["']([^"']+)["']/gi;
@@ -231,6 +359,147 @@ export function detectPaginationFromHTML(html: string): PaginationHints {
 }
 
 /**
+ * Detect pagination from JavaScript code (bundles, inline scripts)
+ */
+export function detectPaginationFromJavaScript(code: string): PaginationHints {
+  const hints: PaginationHints = {};
+
+  // Patterns for infinite scroll
+  const infiniteScrollPatterns = [
+    /intersection[_-]?observer/gi,
+    /addEventListener\s*\(\s*["']scroll["']/gi,
+    /on[_-]?scroll[=:]/gi,
+    /scroll[_-]?pagination/gi,
+    /infinite[_-]?scroll/gi,
+    /lazy[_-]?load/gi,
+  ];
+
+  // Patterns for pagination API calls
+  const paginationAPIPatterns = [
+    /fetch\s*\([^)]*page[=:]/gi,
+    /axios\s*\.\s*(get|post)\s*\([^)]*page[=:]/gi,
+    /\.get\s*\([^)]*page[=:]/gi,
+    /\.post\s*\([^)]*page[=:]/gi,
+    /pagination[=:]/gi,
+    /page[=:]\s*\d+/gi,
+  ];
+
+  // Patterns for GraphQL pagination
+  const graphQLPatterns = [
+    /query\s*\{[^}]*first[^}]*after/gi,
+    /edges\s*\{[^}]*node/gi,
+    /pageInfo\s*\{[^}]*hasNextPage/gi,
+  ];
+
+  let hasInfiniteScroll = false;
+  let hasGraphQL = false;
+  let hasPaginationAPI = false;
+
+  for (const pattern of infiniteScrollPatterns) {
+    if (pattern.test(code)) {
+      hasInfiniteScroll = true;
+      hints.infiniteScroll = true;
+      hints.detectedPattern = "scroll";
+      break;
+    }
+  }
+
+  for (const pattern of graphQLPatterns) {
+    if (pattern.test(code)) {
+      hasGraphQL = true;
+      hints.graphQLCursor = true;
+      if (!hints.detectedPattern) {
+        hints.detectedPattern = "graphql";
+      }
+      break;
+    }
+  }
+
+  for (const pattern of paginationAPIPatterns) {
+    if (pattern.test(code)) {
+      hasPaginationAPI = true;
+      if (!hints.detectedPattern) {
+        hints.detectedPattern = "page";
+      }
+      break;
+    }
+  }
+
+  if (hasInfiniteScroll || hasGraphQL || hasPaginationAPI) {
+    hints.hasPaginationControls = true;
+  }
+
+  return hints;
+}
+
+/**
+ * Detect pagination from RFC 5988 Link headers
+ */
+export function detectPaginationFromLinkHeader(
+  linkHeader: string
+): PaginationHints {
+  const hints: PaginationHints = {};
+
+  // Parse Link header: <url>; rel="next", <url>; rel="prev"
+  const linkPattern = /<([^>]+)>;\s*rel=["']?([^"',\s]+)["']?/gi;
+  const links: Array<{ url: string; rel: string }> = [];
+  let match;
+
+  while ((match = linkPattern.exec(linkHeader)) !== null) {
+    const url = match[1];
+    const rel = match[2]?.toLowerCase();
+
+    if (
+      url &&
+      rel &&
+      (rel === "next" || rel === "prev" || rel === "first" || rel === "last")
+    ) {
+      links.push({ url, rel });
+
+      // Extract pagination params from URL
+      try {
+        const urlObj = new URL(url);
+        urlObj.searchParams.forEach((value, key) => {
+          const keyLower = key.toLowerCase();
+          if (
+            /\b(page|p|pageNum|pageNumber|offset|skip|start|cursor|after|before|next|nextToken)\b/.test(
+              keyLower
+            )
+          ) {
+            if (!hints.queryParams) {
+              hints.queryParams = {};
+            }
+            hints.queryParams[key] = value;
+
+            // Determine pattern type
+            if (!hints.detectedPattern) {
+              if (/\b(page|p|pageNum|pageNumber)\b/.test(keyLower)) {
+                hints.detectedPattern = "page";
+              } else if (/\b(offset|skip|start)\b/.test(keyLower)) {
+                hints.detectedPattern = "offset";
+              } else if (
+                /\b(cursor|after|before|next|nextToken)\b/.test(keyLower)
+              ) {
+                hints.detectedPattern = "cursor";
+              }
+            }
+          }
+        });
+      } catch (e) {
+        // Invalid URL, skip
+      }
+    }
+  }
+
+  if (links.length > 0) {
+    hints.hasPaginationControls = true;
+    hints.examples = links.map((l) => `${l.rel}: ${l.url}`);
+  }
+
+  return hints;
+}
+
+/**
  * Extract pagination hints from JSON response
  */
 export function detectPaginationFromJSON(json: any): PaginationHints {
@@ -262,6 +531,31 @@ export function detectPaginationFromJSON(json: any): PaginationHints {
     "previousPage",
     "previousCursor",
     "pagination",
+    // GraphQL pagination
+    "first",
+    "last",
+    "after",
+    "before",
+    "edges",
+    "pageInfo",
+    // Time-based pagination
+    "since",
+    "until",
+    "from",
+    "to",
+    "startTime",
+    "endTime",
+    "timestamp",
+    "createdAfter",
+    "createdBefore",
+    // Token-based pagination
+    "token",
+    "accessToken",
+    "pageToken",
+    "continuationToken",
+    // Hybrid pagination
+    "pageSize",
+    "pageToken",
   ];
 
   const foundFields: Record<string, any> = {};
@@ -291,10 +585,55 @@ export function detectPaginationFromJSON(json: any): PaginationHints {
             hints.detectedPattern = "page";
           } else if (/\b(offset|skip|start|startIndex)\b/.test(keyLower)) {
             hints.detectedPattern = "offset";
+          } else if (/\b(first|last|edges|pageInfo)\b/.test(keyLower)) {
+            hints.detectedPattern = "graphql";
+            hints.graphQLCursor = true;
+          } else if (
+            /\b(since|until|timestamp|createdAfter|createdBefore|startTime|endTime)\b/.test(
+              keyLower
+            )
+          ) {
+            hints.detectedPattern = "time";
+            hints.timeBased = true;
+          } else if (
+            /\b(token|pageToken|continuationToken|accessToken)\b/.test(keyLower)
+          ) {
+            hints.detectedPattern = "token";
+            hints.tokenBased = true;
           } else if (
             /\b(cursor|nextCursor|nextToken|after|before)\b/.test(keyLower)
           ) {
             hints.detectedPattern = "cursor";
+          }
+        }
+
+        // Check for hybrid pagination
+        if (
+          hints.detectedPattern &&
+          (keyLower.includes("page") ||
+            keyLower.includes("cursor") ||
+            keyLower.includes("token"))
+        ) {
+          const hasPage =
+            foundFields.hasOwnProperty("page") ||
+            foundFields.hasOwnProperty("currentPage");
+          const hasCursor =
+            foundFields.hasOwnProperty("cursor") ||
+            foundFields.hasOwnProperty("after");
+          const hasToken =
+            foundFields.hasOwnProperty("token") ||
+            foundFields.hasOwnProperty("pageToken");
+          const hasSize =
+            foundFields.hasOwnProperty("pageSize") ||
+            foundFields.hasOwnProperty("size");
+
+          if (
+            (hasPage && hasCursor) ||
+            (hasPage && hasToken) ||
+            (hasCursor && hasSize)
+          ) {
+            hints.detectedPattern = "hybrid";
+            hints.hybridPagination = true;
           }
         }
       }
@@ -382,42 +721,14 @@ export function detectPaginationFromHeaders(
   // Check Link header (RFC 5988)
   const linkHeader = headers["Link"] || headers["link"];
   if (linkHeader) {
-    // Parse Link header: <url>; rel="next", <url>; rel="prev"
-    const linkPattern = /<([^>]+)>;\s*rel=["']?([^"',\s]+)["']?/gi;
-    let match;
-    const linkParams: string[] = [];
-
-    while ((match = linkPattern.exec(linkHeader)) !== null) {
-      const url = match[1];
-      const rel = match[2]?.toLowerCase();
-
-      if (
-        rel === "next" ||
-        rel === "prev" ||
-        rel === "first" ||
-        rel === "last"
-      ) {
-        if (!url) continue;
-        try {
-          const urlObj = new URL(url);
-          urlObj.searchParams.forEach((value, key) => {
-            const keyLower = key.toLowerCase();
-            if (
-              /\b(page|p|pageNum|pageNumber|offset|skip|start|cursor|after|before|next|nextToken)\b/.test(
-                keyLower
-              )
-            ) {
-              linkParams.push(`${key}=${value}`);
-            }
-          });
-        } catch (e) {
-          // Invalid URL, skip
-        }
-      }
+    const linkHints = detectPaginationFromLinkHeader(linkHeader);
+    if (linkHints.detectedPattern) {
+      hints.detectedPattern = linkHints.detectedPattern;
     }
-
-    if (linkParams.length > 0) {
-      hints.examples = linkParams;
+    if (linkHints.examples && linkHints.examples.length > 0) {
+      hints.examples = linkHints.examples;
+    }
+    if (linkHints.hasPaginationControls) {
       hints.hasPaginationControls = true;
     }
   }
@@ -491,6 +802,26 @@ export function detectPaginationFromBody(body: any): PaginationHints {
     "before",
     "next",
     "nextToken",
+    // GraphQL pagination
+    "first",
+    "last",
+    "after",
+    "before",
+    // Time-based pagination
+    "since",
+    "until",
+    "from",
+    "to",
+    "startTime",
+    "endTime",
+    "timestamp",
+    "createdAfter",
+    "createdBefore",
+    // Token-based pagination
+    "token",
+    "accessToken",
+    "pageToken",
+    "continuationToken",
   ];
 
   function searchBody(obj: any, path: string = ""): void {
@@ -516,10 +847,55 @@ export function detectPaginationFromBody(body: any): PaginationHints {
             hints.detectedPattern = "page";
           } else if (/\b(offset|skip|start|startIndex)\b/.test(keyLower)) {
             hints.detectedPattern = "offset";
+          } else if (/\b(first|last|edges|pageInfo)\b/.test(keyLower)) {
+            hints.detectedPattern = "graphql";
+            hints.graphQLCursor = true;
+          } else if (
+            /\b(since|until|timestamp|createdAfter|createdBefore|startTime|endTime)\b/.test(
+              keyLower
+            )
+          ) {
+            hints.detectedPattern = "time";
+            hints.timeBased = true;
+          } else if (
+            /\b(token|pageToken|continuationToken|accessToken)\b/.test(keyLower)
+          ) {
+            hints.detectedPattern = "token";
+            hints.tokenBased = true;
           } else if (
             /\b(cursor|nextCursor|nextToken|after|before)\b/.test(keyLower)
           ) {
             hints.detectedPattern = "cursor";
+          }
+        }
+
+        // Check for hybrid pagination
+        if (
+          hints.detectedPattern &&
+          (keyLower.includes("page") ||
+            keyLower.includes("cursor") ||
+            keyLower.includes("token"))
+        ) {
+          const hasPage =
+            foundParams.hasOwnProperty("page") ||
+            foundParams.hasOwnProperty("currentPage");
+          const hasCursor =
+            foundParams.hasOwnProperty("cursor") ||
+            foundParams.hasOwnProperty("after");
+          const hasToken =
+            foundParams.hasOwnProperty("token") ||
+            foundParams.hasOwnProperty("pageToken");
+          const hasSize =
+            foundParams.hasOwnProperty("pageSize") ||
+            foundParams.hasOwnProperty("size");
+
+          if (
+            (hasPage && hasCursor) ||
+            (hasPage && hasToken) ||
+            (hasCursor && hasSize)
+          ) {
+            hints.detectedPattern = "hybrid";
+            hints.hybridPagination = true;
           }
         }
       }

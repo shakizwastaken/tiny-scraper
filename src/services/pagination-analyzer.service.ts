@@ -196,28 +196,69 @@ export class PaginationAnalyzer {
   ): Promise<
     Array<{ candidate: PaginationCandidate; rank: number; reasoning: string }>
   > {
-    // Rule-based scoring first
+    // Enhanced rule-based scoring with multiple factors
     const scoredCandidates = candidates.map((candidate) => {
       const testResult = testResults.find((tr) => tr.pattern === candidate);
       let score = candidate.confidence;
 
-      // Boost score based on test results
+      // Boost score based on test results (40% weight)
       if (testResult) {
         if (testResult.passed) {
           score += 0.3;
         }
         score += testResult.confidence * 0.2;
+
+        // Additional boost for comprehensive tests
+        if (
+          testResult.itemCounts &&
+          testResult.itemCounts.page1 > 0 &&
+          testResult.itemCounts.page2 > 0
+        ) {
+          score += 0.1;
+        }
+        if (testResult.hasMoreDetected) {
+          score += 0.05;
+        }
       }
 
-      // Boost score based on completeness
+      // Boost score based on completeness (10% weight)
       if (candidate.paramName && candidate.location) {
         score += 0.1;
       }
 
+      // Boost score based on pattern type (some patterns are more reliable)
+      if (candidate.pattern === "page") {
+        score += 0.05; // Page-based is most common and reliable
+      } else if (candidate.pattern === "cursor") {
+        score += 0.03; // Cursor-based is reliable but less common
+      }
+
+      // Boost score based on type (query params are most reliable)
+      if (candidate.type === "query") {
+        score += 0.05;
+      } else if (candidate.type === "body") {
+        score += 0.03;
+      }
+
+      // Boost score if examples are provided
+      if (candidate.examples && candidate.examples.length > 0) {
+        score += 0.02;
+      }
+
+      // Penalize UI-based pagination (less reliable)
+      if (candidate.type === "ui") {
+        score -= 0.1;
+      }
+
       return {
-        candidate: { ...candidate, confidence: Math.min(score, 1.0) },
+        candidate: {
+          ...candidate,
+          confidence: Math.min(Math.max(score, 0), 1.0),
+        },
         originalScore: candidate.confidence,
         testScore: testResult?.confidence || 0,
+        passed: testResult?.passed || false,
+        itemCounts: testResult?.itemCounts,
       };
     });
 
@@ -270,9 +311,9 @@ export class PaginationAnalyzer {
     const candidates: PaginationCandidate[] = [];
 
     try {
-      // Find pagination buttons/links
+      // Find pagination buttons/links with enhanced detection
       const buttons = await page.$$eval(
-        'button, a, [role="button"]',
+        'button, a, [role="button"], [data-page], [data-next], [data-pagination]',
         (elements) => {
           return elements
             .map((el) => {
@@ -302,6 +343,12 @@ export class PaginationAnalyzer {
                 "more",
                 "page",
                 "pagination",
+                "prev",
+                "previous",
+                "first",
+                "last",
+                "scroll",
+                "infinite",
               ];
 
               const hasPaginationKeyword =
@@ -313,7 +360,12 @@ export class PaginationAnalyzer {
                 ) ||
                 Object.keys(dataAttrs).some((key) =>
                   paginationKeywords.some((kw) => key.includes(kw))
-                );
+                ) ||
+                // Check for pagination data attributes
+                el.hasAttribute("data-page") ||
+                el.hasAttribute("data-next") ||
+                el.hasAttribute("data-pagination") ||
+                el.hasAttribute("data-page-number");
 
               if (hasPaginationKeyword) {
                 return {
@@ -328,6 +380,8 @@ export class PaginationAnalyzer {
                       : "") || "",
                   onClick: el.getAttribute("onclick") || "",
                   dataAttrs,
+                  className,
+                  id,
                 };
               }
               return null;
@@ -336,6 +390,24 @@ export class PaginationAnalyzer {
         }
       );
 
+      // Detect infinite scroll containers
+      const scrollContainers = await page
+        .$$eval(
+          '[data-infinite-scroll], [data-lazy-load], .infinite-scroll, .lazy-load, [class*="scroll"]',
+          (elements) => {
+            return elements.map((el) => ({
+              selector:
+                el.tagName.toLowerCase() +
+                (el.id ? `#${el.id}` : "") +
+                (el.className ? `.${el.className.split(" ")[0]}` : ""),
+              className: el.className || "",
+              id: el.id || "",
+              hasScrollListener: false, // Would need to check event listeners
+            }));
+          }
+        )
+        .catch(() => []);
+
       for (const button of buttons) {
         // Try to extract pagination info from button
         if (button.href) {
@@ -343,35 +415,103 @@ export class PaginationAnalyzer {
             const url = new URL(button.href);
             const pageParam =
               url.searchParams.get("page") || url.searchParams.get("p");
+            const offsetParam = url.searchParams.get("offset");
+            const cursorParam =
+              url.searchParams.get("cursor") || url.searchParams.get("after");
+
             if (pageParam) {
               candidates.push({
                 type: "ui",
                 location: `ui.link.${button.selector}`,
                 paramName: "page",
                 pattern: "page",
-                confidence: 0.7,
+                confidence: 0.8,
+                examples: [button.href],
+              });
+            } else if (offsetParam) {
+              candidates.push({
+                type: "ui",
+                location: `ui.link.${button.selector}`,
+                paramName: "offset",
+                pattern: "offset",
+                confidence: 0.75,
+                examples: [button.href],
+              });
+            } else if (cursorParam) {
+              candidates.push({
+                type: "ui",
+                location: `ui.link.${button.selector}`,
+                paramName: "cursor",
+                pattern: "cursor",
+                confidence: 0.75,
                 examples: [button.href],
               });
             }
           } catch (e) {
-            // Invalid URL
+            // Invalid URL, try relative URL
+            if (button.href.startsWith("/") || button.href.startsWith("?")) {
+              const urlMatch = button.href.match(
+                /[?&](page|offset|cursor|after)=([^&]+)/
+              );
+              if (urlMatch) {
+                candidates.push({
+                  type: "ui",
+                  location: `ui.link.${button.selector}`,
+                  paramName: urlMatch[1],
+                  pattern:
+                    urlMatch[1] === "page"
+                      ? "page"
+                      : urlMatch[1] === "offset"
+                      ? "offset"
+                      : "cursor",
+                  confidence: 0.7,
+                  examples: [button.href],
+                });
+              }
+            }
           }
         }
 
-        // Check data attributes
+        // Check data attributes with more patterns
         if (
           button.dataAttrs["data-page"] ||
-          button.dataAttrs["data-next-page"]
+          button.dataAttrs["data-next-page"] ||
+          button.dataAttrs["data-page-number"]
         ) {
           candidates.push({
             type: "ui",
             location: `ui.button.${button.selector}`,
             paramName: "page",
             pattern: "page",
-            confidence: 0.6,
+            confidence: 0.7,
             examples: [JSON.stringify(button.dataAttrs)],
           });
         }
+
+        // Check for load more buttons
+        if (
+          button.text.includes("load more") ||
+          button.text.includes("show more")
+        ) {
+          candidates.push({
+            type: "ui",
+            location: `ui.button.${button.selector}`,
+            pattern: "scroll",
+            confidence: 0.6,
+            examples: [button.text],
+          });
+        }
+      }
+
+      // Add infinite scroll candidates
+      for (const container of scrollContainers) {
+        candidates.push({
+          type: "scroll",
+          location: `ui.scroll.${container.selector}`,
+          pattern: "scroll",
+          confidence: 0.65,
+          examples: [container.className],
+        });
       }
     } catch (error) {
       console.warn("UI detection failed:", error);

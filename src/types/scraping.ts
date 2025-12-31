@@ -1,18 +1,62 @@
 import { HTTPRequest, HTTPResponse } from "puppeteer";
 
 export interface JSONSchema {
-  type: string;
+  type?: string | string[]; // Support multiple types or single type
   properties?: Record<string, JSONSchema>;
-  items?: JSONSchema;
+  items?: JSONSchema | JSONSchema[]; // Support tuple types with array of schemas
   required?: string[];
   format?: string;
   description?: string;
+  // Advanced JSON Schema features
+  anyOf?: JSONSchema[];
+  allOf?: JSONSchema[];
+  oneOf?: JSONSchema[];
+  not?: JSONSchema;
+  enum?: (string | number | boolean | null)[];
+  const?: string | number | boolean | null;
+  additionalProperties?: boolean | JSONSchema;
+  patternProperties?: Record<string, JSONSchema>;
+  // Array constraints
+  minItems?: number;
+  maxItems?: number;
+  uniqueItems?: boolean;
+  // String constraints
+  minLength?: number;
+  maxLength?: number;
+  pattern?: string;
+  // Number constraints
+  minimum?: number;
+  maximum?: number;
+  exclusiveMinimum?: number | boolean;
+  exclusiveMaximum?: number | boolean;
+  multipleOf?: number;
+  // Nullable support
+  nullable?: boolean;
 }
 
 export interface ExtractionSelector {
   selector: string; // CSS selector, XPath, or JSONPath
   type?: "text" | "attr" | "html" | "jsonpath"; // Extraction type
   attribute?: string; // For attr type, which attribute to extract
+}
+
+/**
+ * Configuration for nested array extraction (unlimited recursive depth)
+ * Supports arrays within arrays within arrays... at any depth
+ */
+export interface NestedExtractionConfig {
+  type: "array";
+  containerSelector: string; // Selector to find container elements for this array level
+  selectors: Record<
+    string,
+    string | ExtractionSelector | NestedExtractionConfig
+  >; // Field -> selector mapping (can be nested)
+  // For JSONPath-based extraction
+  jsonPath?: string; // JSONPath expression to find the array
+  // Metadata
+  description?: string;
+  minItems?: number;
+  maxItems?: number;
 }
 
 export interface ScrapingInstructions {
@@ -25,13 +69,16 @@ export interface ScrapingInstructions {
   extraction?: {
     type: "css" | "xpath" | "jsonpath" | "mixed";
     containerSelector?: string; // For arrays: selector for each item
-    selectors: Record<string, string | ExtractionSelector>; // Field -> selector mapping
+    selectors: Record<
+      string,
+      string | ExtractionSelector | NestedExtractionConfig
+    >; // Field -> selector mapping (supports unlimited nested arrays)
   };
 
   // For JSON responses
   jsonPath?: {
     rootPath?: string; // Path to data root (e.g., "$.data.items")
-    fieldPaths: Record<string, string>; // Field -> JSONPath mapping
+    fieldPaths: Record<string, string | NestedExtractionConfig>; // Field -> JSONPath mapping (supports unlimited nested arrays)
   };
 
   // Output schema (JSON Schema format) - generated automatically from extracted data
@@ -102,11 +149,26 @@ export interface PaginationHints {
   bodyParams?: Record<string, any>;
   urlPattern?: string;
   hasPaginationControls?: boolean;
-  detectedPattern?: "page" | "offset" | "cursor" | "none";
+  detectedPattern?:
+    | "page"
+    | "offset"
+    | "cursor"
+    | "scroll"
+    | "time"
+    | "token"
+    | "graphql"
+    | "hybrid"
+    | "none";
   examples?: string[];
   uiElements?: PaginationUIElement[];
   testResults?: PaginationTestResult[];
   candidates?: PaginationCandidate[];
+  // Additional detection hints
+  infiniteScroll?: boolean;
+  graphQLCursor?: boolean;
+  timeBased?: boolean;
+  tokenBased?: boolean;
+  hybridPagination?: boolean;
 }
 
 export interface PaginationUIElement {

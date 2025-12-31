@@ -310,7 +310,7 @@ CRITICAL REQUIREMENTS - Generate a complete JSON object with the following:
      expectedOutputType ? ` (User expects: "${expectedOutputType}")` : ""
    }
 
-2. DATA EXTRACTION - SELECTORS ONLY:
+2. DATA EXTRACTION - SELECTORS ONLY (SUPPORTS UNLIMITED RECURSIVE NESTED ARRAYS):
 
    For HTML/XML responses:
    - "extraction" object with:
@@ -322,14 +322,59 @@ CRITICAL REQUIREMENTS - Generate a complete JSON object with the following:
        * For attributes: use "::attr(attrName)" suffix
        * For HTML content: use "::html" suffix
        * For XPath: use full XPath expression
+       * For NESTED ARRAYS (unlimited depth): use nested extraction config:
+         {
+           "type": "array",
+           "containerSelector": ".nested-container",
+           "selectors": {
+             "nestedField1": ".nested-field1::text",
+             "nestedField2": ".nested-field2::attr(data-value)",
+             "deeplyNestedArray": {
+               "type": "array",
+               "containerSelector": ".deeply-nested-container",
+               "selectors": {
+                 "deepField": ".deep-field::text"
+               }
+             }
+           }
+         }
+       * You can nest arrays to ANY depth - array -> array -> array -> ...
 
    For JSON responses:
    - "jsonPath" object with:
      - "rootPath": JSONPath to data root (e.g., "$.data.items" or "$.results")
      - "fieldPaths": Object mapping field names to JSONPath expressions
        * Format: "fieldName": "$.path.to.field" or "$.array[*].field"
+       * For NESTED ARRAYS (unlimited depth): use nested extraction config:
+         {
+           "type": "array",
+           "jsonPath": "$.items[*].tags[*]",
+           "selectors": {
+             "tagName": "$.name",
+             "tagValue": "$.value",
+             "nestedTags": {
+               "type": "array",
+               "jsonPath": "$.subtags[*]",
+               "selectors": {
+                 "subTagName": "$.name"
+               }
+             }
+           }
+         }
+       * You can nest arrays to ANY depth - array -> array -> array -> ...
 
-   NOTE: The schema will be automatically generated from the extracted data. You only need to provide the selectors.
+   IMPORTANT NESTED ARRAYS:
+   - The system supports UNLIMITED recursive depth for nested arrays
+   - If you see arrays within arrays within arrays, represent them using nested extraction configs
+   - Each nested array level needs its own containerSelector (HTML) or jsonPath (JSON)
+   - The selectors within each nested level can themselves contain more nested arrays
+   - Example: products -> reviews -> comments -> replies (4 levels deep) is fully supported
+
+   NOTE: The schema will be automatically generated from the extracted data with full support for:
+   - Unlimited recursive nested arrays
+   - Advanced JSON Schema features (anyOf, allOf, oneOf, enum, constraints, etc.)
+   - Union types when multiple data types are detected
+   - You only need to provide the selectors - the schema generation handles everything automatically.
 
 3. PAGINATION (only if pagination exists, otherwise omit entirely):
    CRITICAL: Only include pagination if you can clearly identify pagination patterns. If uncertain, omit it.
@@ -368,6 +413,12 @@ IMPORTANT:
 - Be extremely precise with selectors - they must work for actual scraping
 - For HTML arrays, containerSelector is REQUIRED
 - You only need to provide SELECTORS - the schema will be generated automatically from extracted data
+- NESTED ARRAYS: If you see arrays within arrays, use nested extraction configs - the system supports unlimited depth
+- SCHEMA GENERATION: The system automatically generates advanced JSON Schemas with:
+  * Unlimited recursive nested array support
+  * Union types (anyOf, oneOf) when multiple types detected
+  * Constraints (min/max, patterns, enums) inferred from data
+  * Nullable types when null values are present
 - Return ONLY valid JSON, no markdown, no code blocks, no explanations
 
 Expected JSON structure (schema is NOT needed):
@@ -403,7 +454,11 @@ Expected JSON structure (schema is NOT needed):
   try {
     // Final token check before API call
     const systemMessage =
-      "You are an expert API analyst. Generate JSON scraping instructions based on API responses. You only need to provide selectors for data extraction - the schema will be generated automatically. Always return valid JSON only.";
+      "You are an expert API analyst. Generate JSON scraping instructions based on API responses. " +
+      "You only need to provide selectors for data extraction - the schema will be generated automatically with full support for " +
+      "unlimited recursive nested arrays and advanced JSON Schema features (anyOf, allOf, oneOf, enum, constraints, etc.). " +
+      "If you see arrays within arrays within arrays, represent them using nested extraction configs - the system supports unlimited depth. " +
+      "Always return valid JSON only.";
     const totalInputTokens =
       estimateTokens(systemMessage) + estimateTokens(prompt);
     const totalTokens = totalInputTokens + OUTPUT_TOKENS;
