@@ -229,10 +229,12 @@ export async function scrapeHandler(
             responseBody!.length
           } chars >= ${FULL_RESPONSE_THRESHOLD})`
         );
+        // Use conservative token limit to avoid TPM limit errors
+        // TPM limit is 400k, reserve space for prompt structure and output
         context = extractContextAroundSearchTerm(
           responseBody!,
           validSearch,
-          1000000 // Max tokens available
+          350000 // Conservative limit to stay within 400k TPM limit
         );
       }
 

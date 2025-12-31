@@ -18,6 +18,7 @@ export const OPENAI_TEMPERATURE = 0.3;
 export const BROWSER_ARGS = ["--no-sandbox", "--disable-setuid-sandbox"];
 export const NAVIGATION_TIMEOUT = 30000;
 export const RESPONSE_WAIT_TIME = 2000;
+export const FETCH_TIMEOUT = 30000; // 30 seconds for HTTP requests
 
 // Full response passthrough threshold (characters)
 // If response body is smaller than this, pass full response to LLM instead of extracting context

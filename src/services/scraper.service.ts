@@ -8,6 +8,8 @@ import {
 } from "./storage.service";
 import { logExtractionDebugInfo } from "./debug.service";
 import type { ExtractionDebugInfo } from "../types/scraping";
+import { FETCH_TIMEOUT } from "../config";
+import { BrowserService } from "./browser.service";
 
 export interface PaginationOptions {
   page?: number;
@@ -140,7 +142,16 @@ function applyPagination(
             String(paginationValue)
           );
         }
-        queryParams[key] = replaced;
+        // If still contains placeholders, try common ones
+        if (replaced.includes("{{date}}")) {
+          // Default to today's date in YYYY-MM-DD format if not replaced
+          const today = new Date().toISOString().split("T")[0] || "";
+          replaced = replaced.replace("{{date}}", today);
+        }
+        // Only add if placeholder was replaced
+        if (!replaced.includes("{{")) {
+          queryParams[key] = replaced;
+        }
       } else {
         queryParams[key] = String(value);
       }
@@ -185,6 +196,34 @@ function applyPagination(
 }
 
 /**
+ * Filter out invalid headers for HTTP/1.1 requests
+ * Removes HTTP/2 pseudo-headers and other problematic headers
+ */
+function filterValidHeaders(
+  headers: Record<string, string>
+): Record<string, string> {
+  const filtered: Record<string, string> = {};
+
+  for (const [key, value] of Object.entries(headers)) {
+    // Skip HTTP/2 pseudo-headers (they start with :)
+    if (key.startsWith(":")) {
+      continue;
+    }
+
+    // Skip other problematic headers
+    // 'priority' can sometimes cause issues
+    if (key.toLowerCase() === "priority") {
+      continue;
+    }
+
+    // Keep all other headers
+    filtered[key] = value;
+  }
+
+  return filtered;
+}
+
+/**
  * Make HTTP request based on instructions
  */
 async function makeRequest(
@@ -196,11 +235,69 @@ async function makeRequest(
     paginationOptions
   );
 
-  const requestHeaders: Record<string, string> = {
-    ...instructions.headers?.static,
+  // Start with headers from instructions (these came from Puppeteer)
+  // Priority: static headers (most reliable) > dynamic headers > pagination headers
+  // Puppeteer headers take precedence - they're more accurate for bot protection
+  const rawHeaders: Record<string, string> = {
+    ...instructions.headers?.static, // These are the exact Puppeteer headers
     ...instructions.headers?.dynamic,
-    ...headers,
+    ...headers, // Pagination-related headers
   };
+
+  const requestHeaders = filterValidHeaders(rawHeaders);
+
+  // Only add defaults if headers are truly missing
+  // Don't override Puppeteer headers - they're more accurate
+  if (!requestHeaders["User-Agent"]) {
+    requestHeaders["User-Agent"] =
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+  }
+  if (!requestHeaders["Accept"]) {
+    requestHeaders["Accept"] =
+      instructions.responseType === "json"
+        ? "application/json, text/plain, */*"
+        : "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7";
+  }
+
+  // Only add these if they're missing - Puppeteer headers take precedence
+  if (!requestHeaders["Accept-Language"]) {
+    requestHeaders["Accept-Language"] = "en-US,en;q=0.9";
+  }
+  if (!requestHeaders["Accept-Encoding"]) {
+    requestHeaders["Accept-Encoding"] = "gzip, deflate, br";
+  }
+  if (!requestHeaders["Referer"]) {
+    // Set referer to the same domain if possible
+    try {
+      const urlObj = new URL(url);
+      requestHeaders["Referer"] = `${urlObj.protocol}//${urlObj.host}/`;
+    } catch {
+      // If URL parsing fails, skip referer
+    }
+  }
+  if (!requestHeaders["Sec-Fetch-Site"]) {
+    requestHeaders["Sec-Fetch-Site"] = "none";
+  }
+  if (!requestHeaders["Sec-Fetch-Mode"]) {
+    requestHeaders["Sec-Fetch-Mode"] = "navigate";
+  }
+  if (!requestHeaders["Sec-Fetch-User"]) {
+    requestHeaders["Sec-Fetch-User"] = "?1";
+  }
+  if (!requestHeaders["Sec-Fetch-Dest"]) {
+    requestHeaders["Sec-Fetch-Dest"] = "document";
+  }
+  if (!requestHeaders["Upgrade-Insecure-Requests"]) {
+    requestHeaders["Upgrade-Insecure-Requests"] = "1";
+  }
+  if (!requestHeaders["Connection"]) {
+    requestHeaders["Connection"] = "keep-alive";
+  }
+
+  // Add cookies if available in instructions
+  if (instructions.cookies && !requestHeaders["Cookie"]) {
+    requestHeaders["Cookie"] = instructions.cookies;
+  }
 
   const requestOptions: RequestInit = {
     method: instructions.method,
@@ -227,7 +324,65 @@ async function makeRequest(
     console.log("Request headers:", requestHeaders);
   }
 
-  const response = await fetch(url, requestOptions);
+  // Add timeout wrapper
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    setTimeout(
+      () => reject(new Error(`Request timeout after ${FETCH_TIMEOUT}ms`)),
+      FETCH_TIMEOUT
+    );
+  });
+
+  const fetchPromise = fetch(url, requestOptions);
+
+  const response = await Promise.race([fetchPromise, timeoutPromise]);
+
+  // If we get a 403, try using browser service as fallback
+  if (response.status === 403) {
+    console.log(
+      "⚠️  Got 403 Forbidden, attempting fallback to browser service..."
+    );
+    let browserService: BrowserService | null = null;
+    try {
+      browserService = new BrowserService();
+      await browserService.launchBrowser();
+      const { page } = await browserService.setupPageWithInterception();
+
+      // Navigate to the URL
+      await browserService.navigateToUrl(page, url);
+
+      // Get cookies from the page (they may be set during navigation)
+      const cookies = await page.cookies();
+      const cookieString = cookies
+        .map((cookie) => `${cookie.name}=${cookie.value}`)
+        .join("; ");
+
+      // Get the HTML content
+      const html = await page.content();
+
+      // Log cookie info for debugging
+      if (cookieString) {
+        console.log(
+          `   ℹ️  Captured ${cookies.length} cookie(s) from browser session`
+        );
+      }
+
+      await browserService.closeBrowser();
+      console.log("✅ Successfully retrieved content using browser service");
+
+      // Note: Cookies are captured but not automatically saved to instructions
+      // The browser service fallback is a one-time workaround for 403 errors
+      return html;
+    } catch (browserError) {
+      console.error("❌ Browser service fallback also failed:", browserError);
+      if (browserService) {
+        await browserService.closeBrowser().catch(() => {});
+      }
+      throw new Error(
+        `HTTP ${response.status}: ${response.statusText} - ${url}`
+      );
+    }
+  }
+
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}: ${response.statusText} - ${url}`);
   }

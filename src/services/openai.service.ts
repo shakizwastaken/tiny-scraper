@@ -8,6 +8,27 @@ import { extractPaginationContext } from "../utils/pagination-detector";
 import { PaginationAnalyzer } from "./pagination-analyzer.service";
 
 /**
+ * Estimate token count for text (rough approximation: ~4 chars per token)
+ * This is a conservative estimate - actual tokens may be slightly less
+ */
+function estimateTokens(text: string): number {
+  // Rough estimate: 4 characters per token (conservative)
+  // For more accuracy, we could use tiktoken, but this is sufficient for truncation
+  return Math.ceil(text.length / 4);
+}
+
+/**
+ * Truncate text to fit within token limit
+ */
+function truncateToTokenLimit(text: string, maxTokens: number): string {
+  const maxChars = maxTokens * 4; // Conservative: 4 chars per token
+  if (text.length <= maxChars) {
+    return text;
+  }
+  return text.substring(0, maxChars) + "\n\n... (truncated due to token limit)";
+}
+
+/**
  * Generate scraping instructions using GPT
  */
 export async function generateScrapingInstructions(
@@ -214,7 +235,8 @@ ${customPrompt}
 `
     : "";
 
-  const prompt = `You are an expert API analyst. Analyze this API response and generate comprehensive scraping instructions in JSON format.
+  // Build prompt structure (without response content) to estimate tokens
+  const promptStructure = `You are an expert API analyst. Analyze this API response and generate comprehensive scraping instructions in JSON format.
 
 Request Details:
 - URL: ${requestUrl}
@@ -230,7 +252,55 @@ ${
     ? `- Full Response Body (${fullResponseBody.length} characters):`
     : `- Response Context (search term is centered in the middle):`
 }
-${responseContent}
+`;
+
+  // Calculate token limits
+  // TPM limit: 400,000 tokens
+  // Reserve: system message (~1000) + prompt structure + max output (4000) + safety margin
+  const TPM_LIMIT = 400000;
+  const SYSTEM_MESSAGE_TOKENS = 1000;
+  const OUTPUT_TOKENS = OPENAI_MAX_TOKENS;
+  const SAFETY_MARGIN = 10000; // Safety margin for token estimation inaccuracy
+
+  const promptStructureTokens = estimateTokens(promptStructure);
+  const reservedTokens =
+    SYSTEM_MESSAGE_TOKENS +
+    promptStructureTokens +
+    OUTPUT_TOKENS +
+    SAFETY_MARGIN;
+  const maxContentTokens = TPM_LIMIT - reservedTokens;
+
+  // Ensure we have at least some tokens for content (minimum 10k)
+  const availableContentTokens = Math.max(10000, maxContentTokens);
+
+  console.log(`   📊 Token estimation:`);
+  console.log(`      - Prompt structure: ~${promptStructureTokens} tokens`);
+  console.log(
+    `      - Reserved (system + structure + output + margin): ~${reservedTokens} tokens`
+  );
+  console.log(
+    `      - Available for content: ~${availableContentTokens} tokens`
+  );
+  console.log(
+    `      - Content size: ${responseContent.length} chars (~${estimateTokens(
+      responseContent
+    )} tokens)`
+  );
+
+  // Truncate response content if needed
+  let truncatedContent = responseContent;
+  if (estimateTokens(responseContent) > availableContentTokens) {
+    const originalLength = responseContent.length;
+    truncatedContent = truncateToTokenLimit(
+      responseContent,
+      availableContentTokens
+    );
+    console.log(
+      `   ⚠️  Content truncated from ${originalLength} to ${truncatedContent.length} chars to fit token limit`
+    );
+  }
+
+  const prompt = `${promptStructure}${truncatedContent}
 
 CRITICAL REQUIREMENTS - Generate a complete JSON object with the following:
 
@@ -331,13 +401,38 @@ Expected JSON structure (schema is NOT needed):
 }`;
 
   try {
+    // Final token check before API call
+    const systemMessage =
+      "You are an expert API analyst. Generate JSON scraping instructions based on API responses. You only need to provide selectors for data extraction - the schema will be generated automatically. Always return valid JSON only.";
+    const totalInputTokens =
+      estimateTokens(systemMessage) + estimateTokens(prompt);
+    const totalTokens = totalInputTokens + OUTPUT_TOKENS;
+
+    console.log(`   📊 Final token check:`);
+    console.log(
+      `      - System message: ~${estimateTokens(systemMessage)} tokens`
+    );
+    console.log(`      - User prompt: ~${estimateTokens(prompt)} tokens`);
+    console.log(`      - Max output: ${OUTPUT_TOKENS} tokens`);
+    console.log(
+      `      - Total estimated: ~${totalTokens} tokens (limit: ${TPM_LIMIT})`
+    );
+
+    if (totalTokens > TPM_LIMIT) {
+      const excess = totalTokens - TPM_LIMIT;
+      console.error(`   ❌ Token limit exceeded by ~${excess} tokens`);
+      throw new Error(
+        `Request too large: Estimated ${totalTokens} tokens exceeds TPM limit of ${TPM_LIMIT}. ` +
+          `Please reduce the response size or use a smaller context window.`
+      );
+    }
+
     const completion = await openai.chat.completions.create({
       model: OPENAI_MODEL,
       messages: [
         {
           role: "system",
-          content:
-            "You are an expert API analyst. Generate JSON scraping instructions based on API responses. You only need to provide selectors for data extraction - the schema will be generated automatically. Always return valid JSON only.",
+          content: systemMessage,
         },
         {
           role: "user",
@@ -362,6 +457,27 @@ Expected JSON structure (schema is NOT needed):
     // Validate structure (but schema is optional)
     validateScrapingInstructions(instructions);
 
+    // Capture cookies from Puppeteer page if available
+    if (page) {
+      try {
+        const cookies = await page.cookies();
+        if (cookies.length > 0) {
+          const cookieString = cookies
+            .map((cookie) => `${cookie.name}=${cookie.value}`)
+            .join("; ");
+          instructions.cookies = cookieString;
+          console.log(
+            `   ✅ Captured ${cookies.length} cookie(s) from browser session`
+          );
+        }
+      } catch (cookieError) {
+        console.warn(
+          "   ⚠️  Failed to capture cookies:",
+          cookieError instanceof Error ? cookieError.message : cookieError
+        );
+      }
+    }
+
     // If pagination analysis found a best candidate, use it to set pagination in instructions
     if (paginationAnalysis?.bestCandidate && !instructions.pagination) {
       const analyzer = new PaginationAnalyzer(openai);
@@ -383,6 +499,24 @@ Expected JSON structure (schema is NOT needed):
       "   ❌ GPT call failed:",
       error instanceof Error ? error.message : error
     );
+
+    // Handle token limit errors specifically
+    if (error instanceof Error) {
+      const errorMessage = error.message.toLowerCase();
+      if (
+        errorMessage.includes("429") ||
+        errorMessage.includes("token") ||
+        errorMessage.includes("tpm") ||
+        errorMessage.includes("too large")
+      ) {
+        throw new Error(
+          `Token limit exceeded. The response is too large for the model's TPM limit. ` +
+            `Try using a smaller search term or reducing the response size. ` +
+            `Original error: ${error.message}`
+        );
+      }
+    }
+
     throw error;
   }
 }

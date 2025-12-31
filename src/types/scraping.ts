@@ -58,6 +58,7 @@ export interface ScrapingInstructions {
     dynamic: Record<string, string>; // Headers that might need placeholders
     static: Record<string, string>; // Static headers
   };
+  cookies?: string; // Cookie string to send with requests (format: "name=value; name2=value2")
 }
 
 export interface RequestMetadata {
