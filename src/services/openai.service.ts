@@ -4,7 +4,12 @@ import { type ScrapingInstructions } from "../types";
 import { detectResponseType } from "../utils/response-detector";
 import { validateScrapingInstructions } from "../validators/scraping.validator";
 import { OPENAI_MODEL, OPENAI_MAX_TOKENS, OPENAI_TEMPERATURE } from "../config";
-import { extractPaginationContext } from "../utils/pagination-detector";
+import {
+  extractPaginationContext,
+  detectPaginationFromUrl,
+  detectPaginationFromJSON,
+  detectPaginationFromHTML,
+} from "../utils/pagination-detector";
 import { PaginationAnalyzer } from "./pagination-analyzer.service";
 
 /**
@@ -185,11 +190,7 @@ ${extractPaginationContext(fullResponseBody) || "(No pagination context found)"}
       e
     );
     // Fallback to basic detection if comprehensive analysis fails
-    const {
-      detectPaginationFromUrl,
-      detectPaginationFromHTML,
-      detectPaginationFromJSON,
-    } = await import("../utils/pagination-detector");
+
     const urlHints = detectPaginationFromUrl(requestUrl);
     let responseHints = {};
     try {

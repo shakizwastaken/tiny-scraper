@@ -12,6 +12,7 @@ import { logPaginationDebugInfo } from "./debug.service";
 import { generateSchemaFromData } from "../utils/schema-generator";
 import { PaginationTester } from "./pagination-test.service";
 import { PaginationAnalyzer } from "./pagination-analyzer.service";
+import * as cheerio from "cheerio";
 
 /**
  * Test scraping instructions by executing them
@@ -77,7 +78,6 @@ export async function testInstructions(id: string): Promise<TestResults> {
             instructions.extraction?.containerSelector
           ) {
             try {
-              const cheerio = await import("cheerio");
               const $ = cheerio.load(actualHtmlResponse);
               const containerSelector =
                 instructions.extraction.containerSelector

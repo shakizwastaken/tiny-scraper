@@ -82,6 +82,12 @@ function applyPagination(
 
   // Apply pagination based on type
   if (pagination.type === "query") {
+    if (!pagination.location) {
+      console.warn(
+        "⚠️  Pagination type is 'query' but location is undefined, skipping pagination"
+      );
+      return { url: instructions.baseUrl };
+    }
     const parts = pagination.location.split(".");
     const location = parts[0];
     const param = parts[1];
@@ -92,6 +98,15 @@ function applyPagination(
       }
     }
   } else if (pagination.type === "body") {
+    if (!pagination.location) {
+      console.warn(
+        "⚠️  Pagination type is 'body' but location is undefined, skipping pagination"
+      );
+      return {
+        url: instructions.baseUrl,
+        body: instructions.body?.structure,
+      };
+    }
     body = { ...instructions.body?.structure };
     const parts = pagination.location.split(".");
     const location = parts[0];
@@ -116,6 +131,12 @@ function applyPagination(
       }
     }
   } else if (pagination.type === "header") {
+    if (!pagination.location) {
+      console.warn(
+        "⚠️  Pagination type is 'header' but location is undefined, skipping pagination"
+      );
+      return { url: instructions.baseUrl, headers: {} };
+    }
     const parts = pagination.location.split(".");
     const location = parts[0];
     const headerName = parts[1];
@@ -238,11 +259,34 @@ async function makeRequest(
   // Start with headers from instructions (these came from Puppeteer)
   // Priority: static headers (most reliable) > dynamic headers > pagination headers
   // Puppeteer headers take precedence - they're more accurate for bot protection
-  const rawHeaders: Record<string, string> = {
-    ...instructions.headers?.static, // These are the exact Puppeteer headers
-    ...instructions.headers?.dynamic,
-    ...headers, // Pagination-related headers
+  // Use case-insensitive header merging to prevent duplicates
+  const rawHeaders: Record<string, string> = {};
+  const headerKeys = new Set<string>();
+
+  // Helper to add header with case-insensitive deduplication
+  const addHeader = (key: string, value: string) => {
+    const lowerKey = key.toLowerCase();
+    // Only add if we haven't seen this header before (first occurrence wins)
+    if (!headerKeys.has(lowerKey)) {
+      headerKeys.add(lowerKey);
+      rawHeaders[key] = value;
+    }
   };
+
+  // Merge headers in priority order
+  if (instructions.headers?.static) {
+    Object.entries(instructions.headers.static).forEach(([k, v]) =>
+      addHeader(k, v)
+    );
+  }
+  if (instructions.headers?.dynamic) {
+    Object.entries(instructions.headers.dynamic).forEach(([k, v]) =>
+      addHeader(k, v)
+    );
+  }
+  if (headers) {
+    Object.entries(headers).forEach(([k, v]) => addHeader(k, v));
+  }
 
   const requestHeaders = filterValidHeaders(rawHeaders);
 
@@ -439,6 +483,13 @@ async function makeRequest(
           );
           await new Promise((resolve) => setTimeout(resolve, waitTime));
           continue;
+        }
+
+        // After all retries exhausted for 5xx errors
+        if (response.status >= 500 && response.status < 600) {
+          throw new Error(
+            `HTTP ${response.status}: ${response.statusText} - ${url} (Failed after ${maxRetries} retry attempts)`
+          );
         }
 
         // Don't retry on 4xx errors (client errors)
