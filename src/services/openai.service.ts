@@ -323,6 +323,17 @@ CRITICAL REQUIREMENTS - Generate a complete JSON object with the following:
        * For attributes: use "::attr(attrName)" suffix
        * For HTML content: use "::html" suffix
        * For XPath: use full XPath expression
+       * For DATA TRANSFORMATION after extraction, use regex_replace:
+       *   Format: "selector | regex_replace('pattern', 'replacement')"
+       *   Examples:
+       *     - Extract ID from class: "section | regex_replace('post-item-(\\d+)', '$1')" extracts "123" from "post-item-123"
+       *     - Extract slug from URL: "a | regex_replace('^/products/(.+)$', '$1')" extracts "product-slug" from "/products/product-slug"
+       *     - Clean text: "span.price | regex_replace('[^0-9.]', '')" removes non-numeric characters
+       *   Use regex_replace when you need to:
+       *     - Extract part of a string (IDs, slugs, codes)
+       *     - Clean or normalize extracted data
+       *     - Transform attribute values or text content
+       *   The regex pattern uses JavaScript regex syntax. Use \\d for digits, \\w for word chars, etc.
        * For NESTED ARRAYS (unlimited depth): use nested extraction config:
          {
            "type": "array",

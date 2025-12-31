@@ -978,23 +978,50 @@ function extractFromHTML(
 
   const parseSelector = (
     selector: string | { selector: string; type?: string; attribute?: string }
-  ): { selector: string; type: string; attribute?: string } => {
+  ): {
+    selector: string;
+    type: string;
+    attribute?: string;
+    regexReplace?: { pattern: string; replacement: string };
+  } => {
     if (typeof selector === "string") {
       // Handle empty or invalid selectors
       if (!selector || selector.trim().length === 0) {
         return { selector: "", type: "text" };
       }
 
+      // Check for regex_replace transformation: "selector | regex_replace('pattern', 'replacement')"
+      // Supports both single and double quotes
+      const regexReplaceMatch = selector.match(
+        /^(.+?)\s*\|\s*regex_replace\((['"])(.+?)\2\s*,\s*(['"])(.+?)\4\)$/
+      );
+
+      let baseSelector = selector;
+      let regexReplace: { pattern: string; replacement: string } | undefined;
+
+      if (
+        regexReplaceMatch &&
+        regexReplaceMatch[1] &&
+        regexReplaceMatch[3] &&
+        regexReplaceMatch[5]
+      ) {
+        baseSelector = regexReplaceMatch[1].trim();
+        regexReplace = {
+          pattern: regexReplaceMatch[3],
+          replacement: regexReplaceMatch[5],
+        };
+      }
+
       // Parse format: "selector::text" or "selector::attr(name)" or "selector::html"
-      const textMatch = selector.match(/^(.+)::text$/);
-      const attrMatch = selector.match(/^(.+)::attr\(([^)]+)\)$/);
-      const htmlMatch = selector.match(/^(.+)::html$/);
+      const textMatch = baseSelector.match(/^(.+)::text$/);
+      const attrMatch = baseSelector.match(/^(.+)::attr\(([^)]+)\)$/);
+      const htmlMatch = baseSelector.match(/^(.+)::html$/);
 
       if (textMatch && textMatch[1]) {
         const cleanSelector = normalizeCSSSelector(
           stripPseudoElements(textMatch[1])
         );
-        return { selector: cleanSelector, type: "text" };
+        return { selector: cleanSelector, type: "text", regexReplace };
       } else if (attrMatch && attrMatch[1] && attrMatch[2]) {
         const cleanSelector = normalizeCSSSelector(
           stripPseudoElements(attrMatch[1])
@@ -1003,17 +1030,20 @@ function extractFromHTML(
           selector: cleanSelector,
           type: "attr",
           attribute: attrMatch[2].trim(),
+          regexReplace,
         };
       } else if (htmlMatch && htmlMatch[1]) {
         const cleanSelector = normalizeCSSSelector(
           stripPseudoElements(htmlMatch[1])
         );
-        return { selector: cleanSelector, type: "html" };
+        return { selector: cleanSelector, type: "html", regexReplace };
       }
 
       // Default to text extraction
-      const cleanSelector = normalizeCSSSelector(stripPseudoElements(selector));
-      return { selector: cleanSelector, type: "text" };
+      const cleanSelector = normalizeCSSSelector(
+        stripPseudoElements(baseSelector)
+      );
+      return { selector: cleanSelector, type: "text", regexReplace };
     }
 
     // Handle object selector
@@ -1159,18 +1189,39 @@ function extractFromHTML(
         return null;
       }
 
+      let extractedValue: string | null = null;
+
       if (parsed.type === "text") {
         const text = selected.text();
-        return text ? text.trim() : null;
+        extractedValue = text ? text.trim() : null;
       } else if (parsed.type === "attr" && parsed.attribute) {
-        return selected.attr(parsed.attribute) || null;
+        extractedValue = selected.attr(parsed.attribute) || null;
       } else if (parsed.type === "html") {
-        return selected.html() || null;
+        extractedValue = selected.html() || null;
+      } else {
+        // Default to text
+        const text = selected.text();
+        extractedValue = text ? text.trim() : null;
       }
 
-      // Default to text
-      const text = selected.text();
-      return text ? text.trim() : null;
+      // Apply regex_replace transformation if specified
+      if (extractedValue && parsed.regexReplace) {
+        try {
+          const regex = new RegExp(parsed.regexReplace.pattern);
+          extractedValue = extractedValue.replace(
+            regex,
+            parsed.regexReplace.replacement
+          );
+        } catch (error) {
+          console.warn(
+            `Error applying regex_replace with pattern "${parsed.regexReplace.pattern}":`,
+            error
+          );
+          // Return original value if regex is invalid
+        }
+      }
+
+      return extractedValue;
     } catch (error) {
       console.warn(
         `Error extracting with selector "${parsed.selector}":`,
