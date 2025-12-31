@@ -103,6 +103,63 @@ export interface PaginationHints {
   hasPaginationControls?: boolean;
   detectedPattern?: "page" | "offset" | "cursor" | "none";
   examples?: string[];
+  uiElements?: PaginationUIElement[];
+  testResults?: PaginationTestResult[];
+  candidates?: PaginationCandidate[];
+}
+
+export interface PaginationUIElement {
+  type: "button" | "link" | "scroll";
+  selector: string;
+  text?: string;
+  href?: string;
+  onClick?: string;
+  dataAttributes?: Record<string, string>;
+  detectedMethod: "css" | "text" | "data-attr" | "aria";
+}
+
+export interface PaginationCandidate {
+  type: "query" | "body" | "header" | "response" | "ui" | "scroll";
+  location: string; // e.g., "query.page", "body.pagination.page", "ui.button.loadMore"
+  paramName?: string;
+  pattern: "page" | "offset" | "cursor" | "scroll";
+  confidence: number; // 0-1
+  examples?: string[];
+  testResults?: PaginationTestResult;
+  initialValue?: string | number;
+  placeholder?: string;
+}
+
+export interface PaginationTestResult {
+  pattern: PaginationCandidate;
+  tested: boolean;
+  passed: boolean;
+  error?: string;
+  firstPageDifferent?: boolean;
+  page1Results?: any;
+  page2Results?: any;
+  itemCounts?: { page1: number; page2: number };
+  hasMoreDetected?: boolean;
+  confidence: number; // 0-1 score
+}
+
+export interface PaginationAnalysisResult {
+  candidates: PaginationCandidate[];
+  bestCandidate?: PaginationCandidate;
+  allHints: PaginationHints;
+  testResults: PaginationTestResult[];
+  firstPageBehavior?: {
+    different: boolean;
+    preferredApproach: "no-param" | "explicit-param";
+  };
+}
+
+export interface PaginationContext {
+  url?: string;
+  method?: string;
+  responseType?: "json" | "html" | "xml";
+  headers?: Record<string, string>;
+  body?: any;
 }
 
 export interface ExtractionDebugInfo {

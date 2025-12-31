@@ -1,15 +1,11 @@
 import OpenAI from "openai";
+import type { Page } from "puppeteer";
 import { type ScrapingInstructions } from "../types";
 import { detectResponseType } from "../utils/response-detector";
 import { validateScrapingInstructions } from "../validators/scraping.validator";
 import { OPENAI_MODEL, OPENAI_MAX_TOKENS, OPENAI_TEMPERATURE } from "../config";
-import {
-  detectPaginationFromUrl,
-  detectPaginationFromHTML,
-  detectPaginationFromJSON,
-  extractPaginationContext,
-  type PaginationHints,
-} from "../utils/pagination-detector";
+import { extractPaginationContext } from "../utils/pagination-detector";
+import { PaginationAnalyzer } from "./pagination-analyzer.service";
 
 /**
  * Generate scraping instructions using GPT
@@ -25,7 +21,9 @@ export async function generateScrapingInstructions(
   fullResponseBody: string,
   useFullResponse: boolean = false,
   expectedOutputType?: "array" | "object",
-  customPrompt?: string
+  customPrompt?: string,
+  page?: Page,
+  responseHeaders?: Record<string, string>
 ): Promise<ScrapingInstructions | null> {
   if (!openai) {
     console.log("   ⚠️  OpenAI client not initialized (missing API key)");
@@ -33,7 +31,9 @@ export async function generateScrapingInstructions(
   }
 
   // Detect response type
-  const responseType = detectResponseType(contentType, fullResponseBody);
+  const responseType = detectResponseType(contentType, fullResponseBody) as
+    | "json"
+    | "html";
   console.log("\n=== CALLING GPT FOR SCRAPING INSTRUCTIONS ===");
   console.log(`   Model: ${OPENAI_MODEL}`);
   console.log(`   Detected response type: ${responseType}`);
@@ -41,67 +41,159 @@ export async function generateScrapingInstructions(
 
   const baseUrl = requestUrl.split("?")[0];
 
-  // Detect pagination hints
-  const urlHints = detectPaginationFromUrl(requestUrl);
-  let responseHints: PaginationHints = {};
-
-  try {
-    if (responseType === "json") {
-      const json = JSON.parse(fullResponseBody);
-      responseHints = detectPaginationFromJSON(json);
-    } else {
-      responseHints = detectPaginationFromHTML(fullResponseBody);
-    }
-  } catch (e) {
-    // Ignore errors in pagination detection
-    console.log("   ⚠️  Pagination detection error, continuing without hints");
-  }
-
-  // Extract pagination context
-  const paginationContext = extractPaginationContext(fullResponseBody);
-
-  // Build pagination hints section
-  const paginationHintsSection =
-    urlHints.detectedPattern || responseHints.detectedPattern
-      ? `
-PAGINATION DETECTION HINTS:
-${
-  urlHints.detectedPattern
-    ? `- URL Pattern Detected: ${urlHints.detectedPattern}`
-    : ""
-}
-${
-  urlHints.queryParams && Object.keys(urlHints.queryParams).length > 0
-    ? `- URL Query Params: ${JSON.stringify(urlHints.queryParams)}`
-    : ""
-}
-${
-  responseHints.bodyParams && Object.keys(responseHints.bodyParams).length > 0
-    ? `- Response Pagination Fields: ${JSON.stringify(
-        responseHints.bodyParams
-      )}`
-    : ""
-}
-${
-  responseHints.hasPaginationControls
-    ? `- HTML contains pagination controls (links, buttons, etc.)`
-    : ""
-}
-${
-  urlHints.examples && urlHints.examples.length > 0
-    ? `- Example patterns found: ${urlHints.examples.join(", ")}`
-    : ""
-}
-
-PAGINATION CONTEXT FROM RESPONSE:
-${paginationContext || "(No pagination context found)"}
-`
-      : `
+  // Use comprehensive pagination analyzer
+  let paginationAnalysis = null;
+  let paginationHintsSection = `
 PAGINATION ANALYSIS:
 - No clear pagination patterns detected in URL or response
 - If pagination exists, it may use non-standard parameter names
 - Analyze the request/response carefully for any pagination indicators
 `;
+
+  try {
+    const analyzer = new PaginationAnalyzer(openai);
+    const parsedBody = postData
+      ? (() => {
+          try {
+            return JSON.parse(postData);
+          } catch {
+            return postData;
+          }
+        })()
+      : undefined;
+
+    paginationAnalysis = await analyzer.analyzeAllPaginationTypes(
+      requestUrl,
+      method,
+      headers,
+      parsedBody,
+      fullResponseBody,
+      responseType as "json" | "html",
+      responseHeaders || {},
+      page
+    );
+
+    // Build comprehensive pagination hints section
+    if (paginationAnalysis.candidates.length > 0) {
+      const bestCandidate = paginationAnalysis.bestCandidate;
+      const testResults = paginationAnalysis.testResults.filter(
+        (tr) => tr.passed
+      );
+
+      paginationHintsSection = `
+COMPREHENSIVE PAGINATION DETECTION & TESTING RESULTS:
+
+DETECTED CANDIDATES (${paginationAnalysis.candidates.length}):
+${paginationAnalysis.candidates
+  .map(
+    (c, i) => `
+${i + 1}. Type: ${c.type}, Location: ${c.location}, Pattern: ${
+      c.pattern
+    }, Confidence: ${(c.confidence * 100).toFixed(1)}%
+   ${
+     c.testResults?.passed
+       ? "✅ TEST PASSED"
+       : c.testResults?.tested
+       ? "❌ TEST FAILED"
+       : "⏳ NOT TESTED"
+   }
+   ${c.testResults?.error ? `   Error: ${c.testResults.error}` : ""}
+`
+  )
+  .join("")}
+
+${
+  bestCandidate
+    ? `
+BEST CANDIDATE (RECOMMENDED):
+- Type: ${bestCandidate.type}
+- Location: ${bestCandidate.location}
+- Pattern: ${bestCandidate.pattern}
+- Confidence: ${(bestCandidate.confidence * 100).toFixed(1)}%
+- Test Results: ${bestCandidate.testResults?.passed ? "✅ PASSED" : "❌ FAILED"}
+${
+  bestCandidate.testResults?.itemCounts
+    ? `- Page 1 Items: ${bestCandidate.testResults.itemCounts.page1}, Page 2 Items: ${bestCandidate.testResults.itemCounts.page2}`
+    : ""
+}
+${
+  paginationAnalysis.firstPageBehavior
+    ? `
+- First Page Behavior: ${
+        paginationAnalysis.firstPageBehavior.different
+          ? "Different (prefer " +
+            paginationAnalysis.firstPageBehavior.preferredApproach +
+            ")"
+          : "Same as other pages"
+      }
+`
+    : ""
+}
+`
+    : ""
+}
+
+TEST RESULTS:
+${
+  testResults.length > 0
+    ? testResults
+        .map(
+          (tr, i) => `
+${i + 1}. ${tr.pattern.location}: ${
+            tr.passed ? "✅ PASSED" : "❌ FAILED"
+          } (Confidence: ${(tr.confidence * 100).toFixed(1)}%)
+   ${
+     tr.itemCounts
+       ? `Items: Page 1=${tr.itemCounts.page1}, Page 2=${tr.itemCounts.page2}`
+       : ""
+   }
+   ${tr.error ? `Error: ${tr.error}` : ""}
+`
+        )
+        .join("")
+    : "No tests passed"
+}
+
+PAGINATION CONTEXT FROM RESPONSE:
+${extractPaginationContext(fullResponseBody) || "(No pagination context found)"}
+`;
+    }
+  } catch (e) {
+    console.log(
+      "   ⚠️  Comprehensive pagination analysis error, using basic detection:",
+      e
+    );
+    // Fallback to basic detection if comprehensive analysis fails
+    const {
+      detectPaginationFromUrl,
+      detectPaginationFromHTML,
+      detectPaginationFromJSON,
+    } = await import("../utils/pagination-detector");
+    const urlHints = detectPaginationFromUrl(requestUrl);
+    let responseHints = {};
+    try {
+      if (responseType === "json") {
+        const json = JSON.parse(fullResponseBody);
+        responseHints = detectPaginationFromJSON(json);
+      } else {
+        responseHints = detectPaginationFromHTML(fullResponseBody);
+      }
+    } catch (err) {
+      // Ignore
+    }
+
+    if (urlHints.detectedPattern || (responseHints as any).detectedPattern) {
+      paginationHintsSection = `
+PAGINATION DETECTION HINTS (Basic):
+${urlHints.detectedPattern ? `- URL Pattern: ${urlHints.detectedPattern}` : ""}
+${
+  (responseHints as any).detectedPattern
+    ? `- Response Pattern: ${(responseHints as any).detectedPattern}`
+    : ""
+}
+`;
+    }
+  }
 
   const responseContent = useFullResponse ? fullResponseBody : context;
 
@@ -269,6 +361,18 @@ Expected JSON structure (schema is NOT needed):
 
     // Validate structure (but schema is optional)
     validateScrapingInstructions(instructions);
+
+    // If pagination analysis found a best candidate, use it to set pagination in instructions
+    if (paginationAnalysis?.bestCandidate && !instructions.pagination) {
+      const analyzer = new PaginationAnalyzer(openai);
+      const paginationConfig = analyzer.generatePaginationInstructions(
+        paginationAnalysis.bestCandidate
+      );
+      if (paginationConfig) {
+        instructions.pagination = paginationConfig;
+        console.log("   ✅ Pagination configuration added from analysis");
+      }
+    }
 
     // Schema will be generated automatically when we first extract data
     // For now, we just return the instructions with selectors

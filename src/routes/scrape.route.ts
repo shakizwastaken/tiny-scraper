@@ -217,6 +217,15 @@ export async function scrapeHandler(
         );
       }
 
+      // Get response headers if available
+      const responseHeaders: Record<string, string> = {};
+      if (response) {
+        const respHeaders = response.headers();
+        Object.entries(respHeaders).forEach(([key, value]) => {
+          responseHeaders[key] = value;
+        });
+      }
+
       // Generate scraping instructions with GPT
       try {
         const instructions = await generateScrapingInstructions(
@@ -230,7 +239,9 @@ export async function scrapeHandler(
           responseBody!,
           useFullResponse,
           validExpectedOutputType,
-          validCustomPrompt
+          validCustomPrompt,
+          page,
+          responseHeaders
         );
 
         if (instructions) {

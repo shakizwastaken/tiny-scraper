@@ -50,17 +50,33 @@ function applyPagination(
 
   // Determine pagination value based on type
   let paginationValue: string | number | undefined;
+  let isFirstPage = false;
+
   if (pagination.type === "query" || pagination.type === "body") {
     if (options.page !== undefined) {
       paginationValue = options.page;
+      isFirstPage =
+        options.page === 1 || options.page === pagination.initialValue;
     } else if (options.offset !== undefined) {
       paginationValue = options.offset;
+      isFirstPage =
+        options.offset === 0 || options.offset === pagination.initialValue;
     } else if (pagination.initialValue !== undefined) {
       paginationValue = pagination.initialValue;
+      isFirstPage = true;
     } else {
       paginationValue = 1; // Default to page 1
+      isFirstPage = true;
     }
   }
+
+  // Check if first page should be handled differently (no param vs explicit param)
+  // This would be set based on pagination analysis results
+  // For now, we'll check if initialValue matches the current value
+  const shouldSkipParamForFirstPage =
+    isFirstPage &&
+    pagination.initialValue !== undefined &&
+    paginationValue === pagination.initialValue;
 
   // Apply pagination based on type
   if (pagination.type === "query") {
@@ -68,7 +84,10 @@ function applyPagination(
     const location = parts[0];
     const param = parts[1];
     if (location === "query" && param) {
-      queryParams[param] = String(paginationValue);
+      // Skip adding param for first page if it's handled differently
+      if (!shouldSkipParamForFirstPage) {
+        queryParams[param] = String(paginationValue);
+      }
     }
   } else if (pagination.type === "body") {
     body = { ...instructions.body?.structure };
@@ -76,19 +95,22 @@ function applyPagination(
     const location = parts[0];
     const path = parts.slice(1);
     if (location === "body" && path.length > 0) {
-      let current: any = body;
-      for (let i = 0; i < path.length - 1; i++) {
-        const pathKey = path[i];
-        if (pathKey) {
-          if (!current[pathKey]) {
-            current[pathKey] = {};
+      // Skip adding param for first page if it's handled differently
+      if (!shouldSkipParamForFirstPage) {
+        let current: any = body;
+        for (let i = 0; i < path.length - 1; i++) {
+          const pathKey = path[i];
+          if (pathKey) {
+            if (!current[pathKey]) {
+              current[pathKey] = {};
+            }
+            current = current[pathKey];
           }
-          current = current[pathKey];
         }
-      }
-      const lastKey = path[path.length - 1];
-      if (lastKey) {
-        current[lastKey] = paginationValue;
+        const lastKey = path[path.length - 1];
+        if (lastKey) {
+          current[lastKey] = paginationValue;
+        }
       }
     }
   } else if (pagination.type === "header") {
@@ -96,7 +118,10 @@ function applyPagination(
     const location = parts[0];
     const headerName = parts[1];
     if (location === "header" && headerName) {
-      headers[headerName] = String(paginationValue);
+      // Skip adding header for first page if it's handled differently
+      if (!shouldSkipParamForFirstPage) {
+        headers[headerName] = String(paginationValue);
+      }
     }
   }
 
@@ -278,12 +303,14 @@ function extractFromJSON(
 
       return results;
     }
-    
+
     // If rootData is not an array, log error and try to find array elsewhere
     console.error(
-      `❌ ERROR: outputType is "array" but rootData at path "${jsonPath.rootPath || "$"}" is not an array. Got: ${typeof rootData}`
+      `❌ ERROR: outputType is "array" but rootData at path "${
+        jsonPath.rootPath || "$"
+      }" is not an array. Got: ${typeof rootData}`
     );
-    
+
     // Try to find array in the JSON structure - search common patterns
     const searchPaths = [
       "$.data[*]",
@@ -294,14 +321,18 @@ function extractFromJSON(
       "$.data.items[*]",
       "$.data.results[*]",
     ];
-    
+
     for (const searchPath of searchPaths) {
       try {
         const arrayResults = JSONPath({ path: searchPath, json });
-        if (Array.isArray(arrayResults) && arrayResults.length > 0 && Array.isArray(arrayResults[0])) {
+        if (
+          Array.isArray(arrayResults) &&
+          arrayResults.length > 0 &&
+          Array.isArray(arrayResults[0])
+        ) {
           console.log(`   ℹ️  Found array at path: ${searchPath}`);
           const arrayData = arrayResults[0];
-          
+
           const debugInfo: ExtractionDebugInfo = {
             containerCount: arrayData.length,
             selectorMatches: {},
@@ -346,11 +377,13 @@ function extractFromJSON(
         // Continue searching
       }
     }
-    
+
     // Last resort: if we can't find an array, throw an error
     throw new Error(
-      `Cannot extract array: rootPath "${jsonPath.rootPath || "$"}" points to a ${typeof rootData}, not an array. ` +
-      `Please check that the rootPath in jsonPath points to an array.`
+      `Cannot extract array: rootPath "${
+        jsonPath.rootPath || "$"
+      }" points to a ${typeof rootData}, not an array. ` +
+        `Please check that the rootPath in jsonPath points to an array.`
     );
   }
 

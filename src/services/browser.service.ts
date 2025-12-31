@@ -155,4 +155,47 @@ export class BrowserService {
   getBrowser(): Browser | null {
     return this.browser;
   }
+
+  /**
+   * Get current page for UI detection (returns first page if available)
+   */
+  async getCurrentPage(): Promise<Page | null> {
+    if (!this.browser) {
+      return null;
+    }
+    const pages = await this.browser.pages();
+    return pages.length > 0 ? pages[0] || null : null;
+  }
+
+  /**
+   * Click a pagination button/link for testing
+   */
+  async clickPaginationElement(
+    page: Page,
+    selector: string
+  ): Promise<{ success: boolean; newUrl?: string; error?: string }> {
+    try {
+      const element = await page.$(selector);
+      if (!element) {
+        return { success: false, error: "Element not found" };
+      }
+
+      const urlBefore = page.url();
+      await element.click();
+
+      // Wait for navigation or content change
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      const urlAfter = page.url();
+
+      return {
+        success: true,
+        newUrl: urlAfter !== urlBefore ? urlAfter : undefined,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
 }

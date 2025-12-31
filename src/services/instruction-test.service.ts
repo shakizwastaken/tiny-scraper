@@ -10,6 +10,8 @@ import {
 } from "./storage.service";
 import { logPaginationDebugInfo } from "./debug.service";
 import { generateSchemaFromData } from "../utils/schema-generator";
+import { PaginationTester } from "./pagination-test.service";
+import { PaginationAnalyzer } from "./pagination-analyzer.service";
 
 /**
  * Test scraping instructions by executing them
@@ -178,10 +180,92 @@ export async function testInstructions(id: string): Promise<TestResults> {
       dataSample = extractedData.slice(0, 3); // First 3 items
     }
 
+    // Test pagination if configured
+    let paginationTestResult;
+    if (instructions.pagination) {
+      try {
+        console.log("\n=== TESTING PAGINATION ===");
+        const tester = new PaginationTester();
+        const { url, body, headers } = buildRequestParams(instructions, {});
+
+        // Create a candidate from the pagination config
+        const candidate = {
+          type: instructions.pagination.type,
+          location: instructions.pagination.location,
+          paramName: instructions.pagination.location.split(".").pop(),
+          pattern: instructions.pagination.placeholder.includes("page")
+            ? ("page" as const)
+            : instructions.pagination.placeholder.includes("offset")
+            ? ("offset" as const)
+            : ("cursor" as const),
+          confidence: 0.8,
+          initialValue: instructions.pagination.initialValue,
+        };
+
+        // Test pagination pattern
+        const baseUrl = url.split("?")[0];
+        if (!baseUrl) {
+          paginationTestResult = {
+            tested: true,
+            passed: false,
+            error: "Could not determine base URL",
+          };
+        } else {
+          const testResult = await tester.testPaginationPattern(
+            candidate,
+            baseUrl,
+            instructions.method,
+            headers,
+            body
+          );
+
+          paginationTestResult = {
+            tested: true,
+            passed: testResult.passed,
+            error: testResult.error,
+          };
+
+          // Test first page difference
+          if (testResult.passed) {
+            const firstPageTest = await tester.testFirstPageDifference(
+              candidate,
+              baseUrl,
+              instructions.method,
+              headers,
+              body
+            );
+
+            if (firstPageTest.different) {
+              console.log(
+                `   ℹ️  First page handled differently (prefer: ${firstPageTest.preferredApproach})`
+              );
+            }
+          }
+
+          console.log(
+            `   ${testResult.passed ? "✅" : "❌"} Pagination test: ${
+              testResult.passed ? "PASSED" : "FAILED"
+            }`
+          );
+          if (testResult.error) {
+            console.log(`   Error: ${testResult.error}`);
+          }
+        }
+      } catch (error) {
+        console.warn("   ⚠️  Pagination test failed:", error);
+        paginationTestResult = {
+          tested: true,
+          passed: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }
+
     const testResults: TestResults = {
       success,
       extractedData: dataSample,
       errors: !success ? ["No data extracted or empty result"] : undefined,
+      paginationTestResult,
       debugInfo: {
         totalItems: Array.isArray(extractedData) ? extractedData.length : 1,
         outputType: instructions.outputType,
